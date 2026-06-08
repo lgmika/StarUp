@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: startupconnect-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-startupconnect}
+      POSTGRES_USER: ${POSTGRES_USER:-startupconnect}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-startupconnect_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - startupconnect_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-startupconnect} -d ${POSTGRES_DB:-startupconnect}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: src/StartupConnect.Api/Dockerfile
+    container_name: startupconnect-api
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: ${ASPNETCORE_URLS:-http://+:8080}
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-startupconnect};Username=${POSTGRES_USER:-startupconnect};Password=${POSTGRES_PASSWORD:-startupconnect_password}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  startupconnect_postgres_data:
+
