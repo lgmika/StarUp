@@ -1,0 +1,14 @@
+@StartupConnect.Api_HostAddress = http://localhost:8080
+
+GET {{StartupConnect.Api_HostAddress}}/api/v1/
+Accept: application/json
+
+###
+
+GET {{StartupConnect.Api_HostAddress}}/api/v1/health
+Accept: application/json
+
+###
+
+GET {{StartupConnect.Api_HostAddress}}/api/v1/projects
+Accept: application/json

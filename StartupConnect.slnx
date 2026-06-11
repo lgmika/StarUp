@@ -1,10 +1,10 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/StartupConnect.Api/StartupConnect.Api.csproj" />
-    <Project Path="src/StartupConnect.Application/StartupConnect.Application.csproj" />
-    <Project Path="src/StartupConnect.Domain/StartupConnect.Domain.csproj" />
-    <Project Path="src/StartupConnect.Infrastructure/StartupConnect.Infrastructure.csproj" />
-    <Project Path="src/StartupConnect.Shared/StartupConnect.Shared.csproj" />
+    <Project Path="src/Api/StartupConnect.Api.csproj" />
+    <Project Path="src/Application/StartupConnect.Application.csproj" />
+    <Project Path="src/Domain/StartupConnect.Domain.csproj" />
+    <Project Path="src/Infrastructure/StartupConnect.Infrastructure.csproj" />
+    <Project Path="src/Shared/StartupConnect.Shared.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/StartupConnect.Tests/StartupConnect.Tests.csproj" />

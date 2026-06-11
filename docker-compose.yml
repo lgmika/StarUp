@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-startupconnect}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-startupconnect_password}
     ports:
-      - "5432:5432"
+      - "55432:5432"
     volumes:
       - startupconnect_postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -19,12 +19,13 @@ services:
   api:
     build:
       context: .
-      dockerfile: src/StartupConnect.Api/Dockerfile
+      dockerfile: src/Api/Dockerfile
     container_name: startupconnect-api
     environment:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
       ASPNETCORE_URLS: ${ASPNETCORE_URLS:-http://+:8080}
       ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-startupconnect};Username=${POSTGRES_USER:-startupconnect};Password=${POSTGRES_PASSWORD:-startupconnect_password}
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:-DEV_ONLY_StartupConnect_JwtSigningKey_AtLeast32Chars_ReplaceInProduction}
     ports:
       - "8080:8080"
     depends_on:
@@ -33,4 +34,3 @@ services:
 
 volumes:
   startupconnect_postgres_data:
-

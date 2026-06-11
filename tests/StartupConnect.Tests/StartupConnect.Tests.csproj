@@ -19,11 +19,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\StartupConnect.Api\StartupConnect.Api.csproj" />
-    <ProjectReference Include="..\..\src\StartupConnect.Application\StartupConnect.Application.csproj" />
-    <ProjectReference Include="..\..\src\StartupConnect.Infrastructure\StartupConnect.Infrastructure.csproj" />
-    <ProjectReference Include="..\..\src\StartupConnect.Domain\StartupConnect.Domain.csproj" />
-    <ProjectReference Include="..\..\src\StartupConnect.Shared\StartupConnect.Shared.csproj" />
+    <ProjectReference Include="..\..\src\Api\StartupConnect.Api.csproj" />
+    <ProjectReference Include="..\..\src\Application\StartupConnect.Application.csproj" />
+    <ProjectReference Include="..\..\src\Infrastructure\StartupConnect.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\Domain\StartupConnect.Domain.csproj" />
+    <ProjectReference Include="..\..\src\Shared\StartupConnect.Shared.csproj" />
   </ItemGroup>
 
 </Project>
