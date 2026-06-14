@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using StartupConnect.Application.Moderation.Dtos;
 using StartupConnect.Application.Moderation.Interfaces;
+using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
 using StartupConnect.Infrastructure.Persistence;
@@ -12,7 +13,9 @@ using StartupConnect.Shared.Responses;
 
 namespace StartupConnect.Infrastructure.Moderation;
 
-public sealed class ModeratorService(AppDbContext dbContext) : IModeratorService
+public sealed class ModeratorService(
+    AppDbContext dbContext,
+    IRealtimeNotifier realtimeNotifier) : IModeratorService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -152,7 +155,34 @@ public sealed class ModeratorService(AppDbContext dbContext) : IModeratorService
         });
 
         AddAudit(moderatorUserId, $"Moderator.Project.{decision}", "Project", project.Id, request.Reason);
+        if (nextStatus == ProjectStatus.Published)
+        {
+            var setting = await dbContext.ProjectVisibilitySettings.FirstAsync(item => item.ProjectId == project.Id, cancellationToken);
+            dbContext.Activities.Add(new Activity
+            {
+                ProjectId = project.Id,
+                ActorUserId = moderatorUserId,
+                Type = ActivityType.ProjectPublished,
+                Visibility = setting.Visibility is ProjectVisibility.Public or ProjectVisibility.Limited
+                    ? ActivityVisibility.Public
+                    : ActivityVisibility.MembersOnly,
+                Title = "Project published",
+                Message = $"Project {project.Title} is now published.",
+                TargetType = "Project",
+                TargetId = project.Id
+            });
+        }
+
         await dbContext.SaveChangesAsync(cancellationToken);
+        await realtimeNotifier.ProjectStatusChangedAsync(project.Id, new
+        {
+            project.Id,
+            project.Title,
+            project.Status,
+            project.UpdatedAt,
+            Decision = decision,
+            Reason = request.Reason.Trim()
+        }, cancellationToken);
     }
 
     private static void ValidateTransition(ProjectStatus currentStatus, ModerationDecision decision)
@@ -226,4 +256,3 @@ public sealed class ModeratorService(AppDbContext dbContext) : IModeratorService
         return userId;
     }
 }
-

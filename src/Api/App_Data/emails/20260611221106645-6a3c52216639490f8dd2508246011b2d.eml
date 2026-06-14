@@ -1,0 +1,24 @@
+To: phase10_20260612051042@example.com
+From: StartupConnect <no-reply@startupconnect.local>
+Subject: Reset your StartupConnect password
+
+TEXT:
+Reset your StartupConnect password: http://localhost:3000/auth/reset-password?email=phase10_20260612051042%40example.com&token=JrTZvqt7EGIym-PF4eTWdJoU30YAC8RkzjIU6tVk_HfYHqEIPxL7tW4CVbNADwaNktzJzS3vFBsEKkopG40w0Q
+
+HTML:
+<!doctype html>
+<html>
+<body style="margin:0;background:#f8fafc;font-family:Arial,sans-serif;color:#0f172a">
+  <div style="max-width:640px;margin:0 auto;padding:32px 20px">
+    <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:28px">
+      <p style="margin:0 0 16px;color:#0f766e;font-weight:700">StartupConnect</p>
+      <h1 style="font-size:22px;line-height:1.3;margin:0 0 12px">Reset password</h1>
+      <p style="font-size:15px;line-height:1.7;margin:0;color:#334155">Use the secure link below to set a new password. The link expires soon and can be used once.</p>
+      <p style="margin:24px 0">
+  <a href="http://localhost:3000/auth/reset-password?email=phase10_20260612051042%40example.com&amp;token=JrTZvqt7EGIym-PF4eTWdJoU30YAC8RkzjIU6tVk_HfYHqEIPxL7tW4CVbNADwaNktzJzS3vFBsEKkopG40w0Q" style="background:#0f766e;color:#ffffff;padding:12px 18px;border-radius:6px;text-decoration:none;font-weight:600">Reset password</a>
+</p>
+      <p style="font-size:12px;line-height:1.6;color:#64748b;margin:24px 0 0">If you did not request this email, you can safely ignore it.</p>
+    </div>
+  </div>
+</body>
+</html>

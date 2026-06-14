@@ -1,6 +1,8 @@
 using System.Net;
 using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
+using StartupConnect.Application.Files.Dtos;
+using StartupConnect.Application.Files.Interfaces;
 using StartupConnect.Application.Profiles.Dtos;
 using StartupConnect.Application.Profiles.Interfaces;
 using StartupConnect.Domain.Entities;
@@ -11,7 +13,9 @@ using StartupConnect.Shared.Responses;
 
 namespace StartupConnect.Infrastructure.Profiles;
 
-public sealed class ProfileService(AppDbContext dbContext) : IProfileService
+public sealed class ProfileService(
+    AppDbContext dbContext,
+    IFileStorageService fileStorageService) : IProfileService
 {
     public async Task<ProfileDto> GetMyProfileAsync(ClaimsPrincipal principal, CancellationToken cancellationToken)
     {
@@ -180,28 +184,24 @@ public sealed class ProfileService(AppDbContext dbContext) : IProfileService
 
     public async Task<CvDto> CreateUploadedCvAsync(
         ClaimsPrincipal principal,
-        string originalFileName,
-        string storedFileName,
-        string storagePath,
-        string contentType,
-        long sizeInBytes,
+        StoredFileResult fileResult,
         CancellationToken cancellationToken)
     {
         var userId = GetUserId(principal);
         var file = new StoredFile
         {
             OwnerUserId = userId,
-            OriginalFileName = originalFileName,
-            StoredFileName = storedFileName,
-            StoragePath = storagePath,
-            ContentType = contentType,
-            SizeInBytes = sizeInBytes
+            OriginalFileName = fileResult.OriginalFileName,
+            StoredFileName = fileResult.StoredFileName,
+            StoragePath = fileResult.StoragePath,
+            ContentType = fileResult.ContentType,
+            SizeInBytes = fileResult.SizeInBytes
         };
 
         var cv = new Cv
         {
             UserId = userId,
-            Title = Path.GetFileNameWithoutExtension(originalFileName),
+            Title = Path.GetFileNameWithoutExtension(fileResult.OriginalFileName),
             Type = CvType.UploadedPdf,
             File = file
         };
@@ -244,13 +244,24 @@ public sealed class ProfileService(AppDbContext dbContext) : IProfileService
     public async Task DeleteCvAsync(ClaimsPrincipal principal, Guid cvId, CancellationToken cancellationToken)
     {
         var userId = GetUserId(principal);
-        var cv = await dbContext.CVs.FirstOrDefaultAsync(item => item.Id == cvId && item.UserId == userId && !item.IsDeleted, cancellationToken)
+        var cv = await dbContext.CVs.Include(item => item.File).FirstOrDefaultAsync(item => item.Id == cvId && item.UserId == userId && !item.IsDeleted, cancellationToken)
             ?? throw new ApiException("CV not found", HttpStatusCode.NotFound);
 
         cv.IsDeleted = true;
         cv.UpdatedAt = DateTimeOffset.UtcNow;
+        if (cv.File is not null)
+        {
+            cv.File.IsDeleted = true;
+            cv.File.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+
         AddAudit(userId, "CV.Delete", "CV", cv.Id);
         await dbContext.SaveChangesAsync(cancellationToken);
+
+        if (cv.File is not null)
+        {
+            await fileStorageService.DeleteAsync(cv.File.StoragePath, cancellationToken);
+        }
     }
 
     public async Task<PortfolioDto> CreatePortfolioAsync(ClaimsPrincipal principal, CreatePortfolioRequest request, CancellationToken cancellationToken)
@@ -414,4 +425,3 @@ public sealed class ProfileService(AppDbContext dbContext) : IProfileService
         return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 }
-

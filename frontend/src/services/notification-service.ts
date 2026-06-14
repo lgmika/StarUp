@@ -1,23 +1,29 @@
-import { mockService } from "./mock";
+import api from "@/lib/api";
+import type { ApiResponse } from "@/types/api";
+import type { NotificationDto, NotificationListResponse, UnreadCountDto } from "@/types/notification";
 
 export const notificationService = {
   async listNotifications() {
-    return mockService.getNotifications();
+    const { data } = await api.get<ApiResponse<NotificationListResponse>>("/notifications");
+    return data.data.items;
   },
 
   async getUnreadCount() {
-    return mockService.getUnreadCount();
+    const { data } = await api.get<ApiResponse<UnreadCountDto>>("/notifications/unread-count");
+    return data.data.unreadCount ?? data.data.count ?? 0;
   },
 
   async markRead(notificationId: string) {
-    return mockService.markNotificationRead(notificationId);
+    const { data } = await api.post<ApiResponse<NotificationDto>>(`/notifications/${notificationId}/read`);
+    return data.data;
   },
 
   async markAllRead() {
-    return mockService.markAllNotificationsRead();
+    await api.post<ApiResponse<{ updatedCount: number }>>("/notifications/read-all");
+    return this.listNotifications();
   },
 
   async delete(notificationId: string) {
-    return mockService.deleteNotification(notificationId);
+    await api.delete<ApiResponse<null>>(`/notifications/${notificationId}`);
   },
 };

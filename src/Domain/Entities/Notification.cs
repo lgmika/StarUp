@@ -18,8 +18,9 @@ public sealed class Notification : BaseEntity
 
     public string? ResourceType { get; set; }
 
+    public string? ActionUrl { get; set; }
+
     public DateTimeOffset? ReadAt { get; set; }
 
     public bool IsDeleted { get; set; }
 }
-

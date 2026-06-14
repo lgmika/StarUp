@@ -3,6 +3,7 @@ using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
 using StartupConnect.Application.Applications.Dtos;
 using StartupConnect.Application.Applications.Interfaces;
+using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Constants;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
@@ -12,7 +13,9 @@ using StartupConnect.Shared.Responses;
 
 namespace StartupConnect.Infrastructure.Applications;
 
-public sealed class ApplicationService(AppDbContext dbContext) : IApplicationService
+public sealed class ApplicationService(
+    AppDbContext dbContext,
+    IRealtimeNotifier realtimeNotifier) : IApplicationService
 {
     public async Task<ApplicationDto> ApplyAsync(ClaimsPrincipal principal, Guid projectId, ApplyProjectRequest request, CancellationToken cancellationToken)
     {
@@ -73,6 +76,7 @@ public sealed class ApplicationService(AppDbContext dbContext) : IApplicationSer
         AddHistory(application, ApplicationStatus.Pending, ApplicationStatus.Pending, userId, "Application submitted");
         AddNotification(project.OwnerUserId, "New project application", $"A new member applied to {project.Title}.", project.Id, "Project");
         AddAudit(userId, "Application.Submit", "ProjectApplication", application.Id, null);
+        AddActivity(projectId, userId, ActivityType.ApplicationReceived, ActivityVisibility.MembersOnly, "Application received", "A new member application was received.", "ProjectApplication", application.Id);
         await dbContext.SaveChangesAsync(cancellationToken);
 
         return await GetApplicationDtoAsync(application.Id, cancellationToken);
@@ -172,6 +176,7 @@ public sealed class ApplicationService(AppDbContext dbContext) : IApplicationSer
                 UserId = result.ApplicantUserId,
                 Role = ProjectMemberRole.Member
             });
+            AddActivity(projectId, result.ApplicantUserId, ActivityType.MemberJoined, ActivityVisibility.MembersOnly, "Member joined", "An accepted applicant joined the project.", "ProjectMember", result.ApplicantUserId);
             AddAudit(GetUserId(principal), "Application.Accept.CreateProjectMember", "Project", projectId, request.Reason);
             await dbContext.SaveChangesAsync(cancellationToken);
         }
@@ -225,7 +230,14 @@ public sealed class ApplicationService(AppDbContext dbContext) : IApplicationSer
         AddHistory(application, previous, nextStatus, changedByUserId, request.Reason);
         AddNotification(application.ApplicantUserId, "Application status updated", $"Your application status is now {nextStatus}.", application.Id, "ProjectApplication");
         AddAudit(changedByUserId, $"Application.Status.{nextStatus}", "ProjectApplication", application.Id, request.Reason);
+        if (nextStatus == ApplicationStatus.Accepted)
+        {
+            AddActivity(application.ProjectId, changedByUserId, ActivityType.ApplicationAccepted, ActivityVisibility.MembersOnly, "Application accepted", "A project application was accepted.", "ProjectApplication", application.Id);
+        }
+
         await dbContext.SaveChangesAsync(cancellationToken);
+        var result = await GetApplicationDtoAsync(application.Id, cancellationToken);
+        await realtimeNotifier.ApplicationStatusChangedAsync(application.ApplicantUserId, application.ProjectId, result, cancellationToken);
     }
 
     private static void ValidateFounderTransition(ApplicationStatus currentStatus, ApplicationStatus nextStatus)
@@ -346,6 +358,21 @@ public sealed class ApplicationService(AppDbContext dbContext) : IApplicationSer
         });
     }
 
+    private void AddActivity(Guid projectId, Guid actorUserId, ActivityType type, ActivityVisibility visibility, string title, string? message, string targetType, Guid targetId)
+    {
+        dbContext.Activities.Add(new Activity
+        {
+            ProjectId = projectId,
+            ActorUserId = actorUserId,
+            Type = type,
+            Visibility = visibility,
+            Title = title,
+            Message = message,
+            TargetType = targetType,
+            TargetId = targetId
+        });
+    }
+
     private static void ValidateCoverLetter(string coverLetter)
     {
         if (string.IsNullOrWhiteSpace(coverLetter))
@@ -374,4 +401,3 @@ public sealed class ApplicationService(AppDbContext dbContext) : IApplicationSer
         return userId;
     }
 }
-

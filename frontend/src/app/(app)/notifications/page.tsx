@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Archive, Bell, Check, CheckCheck, RefreshCw } from "lucide-react";
-import { MockNotice } from "@/components/admin/mock-notice";
 import { LoadingState } from "@/components/common/loading-state";
 import { NotificationTypeBadge } from "@/components/notifications/notification-type-badge";
 import { Badge } from "@/components/ui/badge";
@@ -38,7 +37,7 @@ export default function NotificationsPage() {
       setNotifications(nextNotifications);
       setUnreadCount(nextUnreadCount);
     } catch {
-      setError("Could not load notifications from the mock service.");
+      setError("Could not load notifications from the backend.");
     } finally {
       setIsLoading(false);
     }
@@ -77,7 +76,7 @@ export default function NotificationsPage() {
         <div>
           <h1 className="text-2xl font-semibold">Notifications</h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            Mock-backed notification center prepared for future backend notification endpoints.
+            Notification center connected to your backend inbox, unread count, read, and archive actions.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -95,8 +94,6 @@ export default function NotificationsPage() {
           </Button>
         </div>
       </div>
-
-      <MockNotice label="Notifications" />
 
       <div className="grid gap-4 md:grid-cols-3">
         <Panel>
@@ -146,7 +143,7 @@ export default function NotificationsPage() {
           {filteredNotifications.length === 0 ? (
             <div className="rounded-md border border-dashed border-border p-8 text-center">
               <p className="text-sm font-medium">No notifications found</p>
-              <p className="mt-1 text-sm text-muted-foreground">Change the filter or refresh the mock inbox.</p>
+              <p className="mt-1 text-sm text-muted-foreground">Change the filter or refresh your inbox.</p>
             </div>
           ) : (
             filteredNotifications.map((notification) => (

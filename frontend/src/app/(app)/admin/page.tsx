@@ -3,22 +3,25 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
-import { BarChart3, FileText, FolderKanban, Handshake, Settings, UsersRound } from "lucide-react";
+import { BarChart3, Bot, FileText, FolderKanban, HardDrive, Settings, UsersRound, UserCheck } from "lucide-react";
 import { RoleGuard } from "@/components/auth/role-guard";
-import { MockNotice } from "@/components/admin/mock-notice";
 import { LoadingState } from "@/components/common/loading-state";
 import { Panel, PanelBody } from "@/components/ui/panel";
 import { SystemRoles } from "@/lib/constants";
-import { mockService } from "@/services";
+import { adminService } from "@/services";
 import type { AdminDashboardDto } from "@/types/admin";
 
 const metrics = [
   { key: "totalUsers", label: "Users", icon: UsersRound },
+  { key: "activeUsers", label: "Active users", icon: UserCheck },
+  { key: "verifiedUsers", label: "Verified users", icon: UserCheck },
   { key: "totalProjects", label: "Projects", icon: FolderKanban },
-  { key: "pendingProjects", label: "Pending projects", icon: BarChart3 },
-  { key: "publishedProjects", label: "Published projects", icon: BarChart3 },
+  { key: "pendingModeration", label: "Pending moderation", icon: BarChart3 },
   { key: "openReports", label: "Open reports", icon: FileText },
-  { key: "totalInvestorInterests", label: "Investor interests", icon: Handshake },
+  { key: "applications", label: "Applications", icon: FileText },
+  { key: "investors", label: "Investors", icon: UsersRound },
+  { key: "aiRequests", label: "AI requests", icon: Bot },
+  { key: "storageBytes", label: "Storage bytes", icon: HardDrive },
 ] as const;
 
 export default function AdminPage() {
@@ -34,7 +37,7 @@ function AdminDashboard() {
 
   useEffect(() => {
     async function loadDashboard() {
-      setDashboard(await mockService.getAdminDashboard());
+      setDashboard(await adminService.getDashboard());
     }
 
     void loadDashboard();
@@ -46,9 +49,8 @@ function AdminDashboard() {
     <div className="space-y-5">
       <div>
         <h1 className="text-2xl font-semibold">Admin Dashboard</h1>
-        <p className="mt-2 text-sm text-muted-foreground">Mock-backed admin overview until backend admin endpoints are completed.</p>
+        <p className="mt-2 text-sm text-muted-foreground">System health, moderation workload, and platform activity from backend admin endpoints.</p>
       </div>
-      <MockNotice label="Admin dashboard" />
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {metrics.map((metric) => {
           const Icon = metric.icon;

@@ -14,6 +14,19 @@ public sealed class Report : BaseEntity
 
     public string Reason { get; set; } = string.Empty;
 
-    public ReportStatus Status { get; set; } = ReportStatus.Pending;
-}
+    public ReportReasonCode ReasonCode { get; set; } = ReportReasonCode.Other;
 
+    public string Description { get; set; } = string.Empty;
+
+    public string? Evidence { get; set; }
+
+    public ReportStatus Status { get; set; } = ReportStatus.Pending;
+
+    public Guid? AssignedModeratorId { get; set; }
+
+    public User? AssignedModerator { get; set; }
+
+    public string? Resolution { get; set; }
+
+    public DateTimeOffset? ResolvedAt { get; set; }
+}

@@ -15,10 +15,11 @@ public interface IAuthService
 
     Task VerifyEmailAsync(VerifyEmailRequest request, CancellationToken cancellationToken);
 
+    Task ResendVerificationAsync(ResendVerificationRequest request, CancellationToken cancellationToken);
+
     Task<ForgotPasswordResponse> ForgotPasswordAsync(ForgotPasswordRequest request, CancellationToken cancellationToken);
 
     Task ResetPasswordAsync(ResetPasswordRequest request, CancellationToken cancellationToken);
 
     Task<AuthUserDto> GetCurrentUserAsync(ClaimsPrincipal principal, CancellationToken cancellationToken);
 }
-

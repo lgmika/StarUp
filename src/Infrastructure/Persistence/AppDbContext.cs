@@ -5,6 +5,12 @@ namespace StartupConnect.Infrastructure.Persistence;
 
 public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(options)
 {
+    public DbSet<BackgroundJobExecution> BackgroundJobExecutions => Set<BackgroundJobExecution>();
+
+    public DbSet<SystemSetting> SystemSettings => Set<SystemSetting>();
+
+    public DbSet<Activity> Activities => Set<Activity>();
+
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
 
     public DbSet<User> Users => Set<User>();
@@ -43,6 +49,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 
     public DbSet<ProjectMember> ProjectMembers => Set<ProjectMember>();
 
+    public DbSet<ProjectInvitation> ProjectInvitations => Set<ProjectInvitation>();
+
+    public DbSet<ProjectOwnershipTransfer> ProjectOwnershipTransfers => Set<ProjectOwnershipTransfer>();
+
+    public DbSet<ProjectMemberHistory> ProjectMemberHistories => Set<ProjectMemberHistory>();
+
     public DbSet<ProjectAccessGrant> ProjectAccessGrants => Set<ProjectAccessGrant>();
 
     public DbSet<SavedProject> SavedProjects => Set<SavedProject>();
@@ -61,11 +73,39 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 
     public DbSet<ReportAction> ReportActions => Set<ReportAction>();
 
+    public DbSet<RecommendationDismissal> RecommendationDismissals => Set<RecommendationDismissal>();
+
+    public DbSet<SubscriptionPlan> SubscriptionPlans => Set<SubscriptionPlan>();
+
+    public DbSet<UserSubscription> UserSubscriptions => Set<UserSubscription>();
+
+    public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
+
+    public DbSet<PaymentWebhookEvent> PaymentWebhookEvents => Set<PaymentWebhookEvent>();
+
+    public DbSet<UsageQuota> UsageQuotas => Set<UsageQuota>();
+
     public DbSet<ProjectApplication> ProjectApplications => Set<ProjectApplication>();
 
     public DbSet<ApplicationAttachment> ApplicationAttachments => Set<ApplicationAttachment>();
 
     public DbSet<ApplicationStatusHistory> ApplicationStatusHistories => Set<ApplicationStatusHistory>();
+
+    public DbSet<ProjectInterview> ProjectInterviews => Set<ProjectInterview>();
+
+    public DbSet<InterviewParticipant> InterviewParticipants => Set<InterviewParticipant>();
+
+    public DbSet<InterviewStatusHistory> InterviewStatusHistories => Set<InterviewStatusHistory>();
+
+    public DbSet<Conversation> Conversations => Set<Conversation>();
+
+    public DbSet<ConversationParticipant> ConversationParticipants => Set<ConversationParticipant>();
+
+    public DbSet<Message> Messages => Set<Message>();
+
+    public DbSet<MessageAttachment> MessageAttachments => Set<MessageAttachment>();
+
+    public DbSet<MessageReadReceipt> MessageReadReceipts => Set<MessageReadReceipt>();
 
     public DbSet<InvestorProfile> InvestorProfiles => Set<InvestorProfile>();
 
@@ -80,6 +120,50 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        modelBuilder.Entity<BackgroundJobExecution>(entity =>
+        {
+            entity.ToTable("background_job_executions");
+            entity.HasKey(execution => execution.Id);
+            entity.HasIndex(execution => new { execution.JobName, execution.StartedAt });
+            entity.HasIndex(execution => new { execution.Status, execution.StartedAt });
+            entity.Property(execution => execution.JobName).HasMaxLength(160).IsRequired();
+            entity.Property(execution => execution.Error).HasMaxLength(1000);
+        });
+
+        modelBuilder.Entity<SystemSetting>(entity =>
+        {
+            entity.ToTable("system_settings");
+            entity.HasKey(setting => setting.Id);
+            entity.HasIndex(setting => setting.Key).IsUnique();
+            entity.HasIndex(setting => setting.Group);
+            entity.Property(setting => setting.Key).HasMaxLength(160).IsRequired();
+            entity.Property(setting => setting.Group).HasMaxLength(80).IsRequired();
+            entity.Property(setting => setting.Value).HasMaxLength(2000).IsRequired();
+            entity.Property(setting => setting.Type).HasMaxLength(40).IsRequired();
+        });
+
+        modelBuilder.Entity<Activity>(entity =>
+        {
+            entity.ToTable("activities");
+            entity.HasKey(activity => activity.Id);
+            entity.HasIndex(activity => new { activity.ProjectId, activity.CreatedAt });
+            entity.HasIndex(activity => new { activity.Visibility, activity.CreatedAt });
+            entity.Property(activity => activity.Title).HasMaxLength(180).IsRequired();
+            entity.Property(activity => activity.Message).HasMaxLength(1000);
+            entity.Property(activity => activity.TargetType).HasMaxLength(120);
+            entity.Property(activity => activity.MetadataJson).HasColumnType("jsonb");
+
+            entity.HasOne(activity => activity.Project)
+                .WithMany()
+                .HasForeignKey(activity => activity.ProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(activity => activity.ActorUser)
+                .WithMany()
+                .HasForeignKey(activity => activity.ActorUserId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
 
         modelBuilder.Entity<AuditLog>(entity =>
         {
@@ -103,6 +187,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(user => user.NormalizedEmail).HasMaxLength(255).IsRequired();
             entity.Property(user => user.PasswordHash).HasMaxLength(500).IsRequired();
             entity.Property(user => user.FullName).HasMaxLength(160).IsRequired();
+            entity.Property(user => user.SuspensionReason).HasMaxLength(1000);
+            entity.Property(user => user.BanReason).HasMaxLength(1000);
         });
 
         modelBuilder.Entity<Role>(entity =>
@@ -387,6 +473,62 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
+        modelBuilder.Entity<ProjectInvitation>(entity =>
+        {
+            entity.ToTable("project_invitations");
+            entity.HasKey(invitation => invitation.Id);
+            entity.HasIndex(invitation => new { invitation.ProjectId, invitation.Email, invitation.Status });
+            entity.Property(invitation => invitation.Email).HasMaxLength(255).IsRequired();
+            entity.Property(invitation => invitation.Message).HasMaxLength(1000);
+
+            entity.HasOne(invitation => invitation.Project)
+                .WithMany()
+                .HasForeignKey(invitation => invitation.ProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(invitation => invitation.InvitedByUser)
+                .WithMany()
+                .HasForeignKey(invitation => invitation.InvitedByUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(invitation => invitation.InvitedUser)
+                .WithMany()
+                .HasForeignKey(invitation => invitation.InvitedUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<ProjectOwnershipTransfer>(entity =>
+        {
+            entity.ToTable("project_ownership_transfers");
+            entity.HasKey(transfer => transfer.Id);
+            entity.HasIndex(transfer => transfer.TokenHash).IsUnique();
+            entity.Property(transfer => transfer.TokenHash).HasMaxLength(128).IsRequired();
+
+            entity.HasOne(transfer => transfer.Project)
+                .WithMany()
+                .HasForeignKey(transfer => transfer.ProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(transfer => transfer.FromUser)
+                .WithMany()
+                .HasForeignKey(transfer => transfer.FromUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(transfer => transfer.ToUser)
+                .WithMany()
+                .HasForeignKey(transfer => transfer.ToUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<ProjectMemberHistory>(entity =>
+        {
+            entity.ToTable("project_member_histories");
+            entity.HasKey(history => history.Id);
+            entity.HasIndex(history => new { history.ProjectId, history.UserId, history.CreatedAt });
+            entity.Property(history => history.Action).HasMaxLength(120).IsRequired();
+            entity.Property(history => history.Reason).HasMaxLength(1000);
+        });
+
         modelBuilder.Entity<ProjectAccessGrant>(entity =>
         {
             entity.ToTable("project_access_grants");
@@ -517,6 +659,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(notification => notification.Title).HasMaxLength(180).IsRequired();
             entity.Property(notification => notification.Message).HasMaxLength(1000).IsRequired();
             entity.Property(notification => notification.ResourceType).HasMaxLength(80);
+            entity.Property(notification => notification.ActionUrl).HasMaxLength(500);
 
             entity.HasOne(notification => notification.User)
                 .WithMany()
@@ -531,10 +674,18 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasIndex(report => new { report.Status, report.CreatedAt });
             entity.Property(report => report.TargetType).HasMaxLength(80).IsRequired();
             entity.Property(report => report.Reason).HasMaxLength(1000).IsRequired();
+            entity.Property(report => report.Description).HasMaxLength(2000).IsRequired();
+            entity.Property(report => report.Evidence).HasMaxLength(2000);
+            entity.Property(report => report.Resolution).HasMaxLength(2000);
 
             entity.HasOne(report => report.ReporterUser)
                 .WithMany()
                 .HasForeignKey(report => report.ReporterUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(report => report.AssignedModerator)
+                .WithMany()
+                .HasForeignKey(report => report.AssignedModeratorId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
@@ -554,6 +705,123 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .WithMany()
                 .HasForeignKey(action => action.ActorUserId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<RecommendationDismissal>(entity =>
+        {
+            entity.ToTable("recommendation_dismissals");
+            entity.HasKey(dismissal => dismissal.Id);
+            entity.HasIndex(dismissal => new { dismissal.UserId, dismissal.RecommendationId }).IsUnique();
+            entity.HasIndex(dismissal => new { dismissal.UserId, dismissal.Type });
+
+            entity.HasOne(dismissal => dismissal.User)
+                .WithMany()
+                .HasForeignKey(dismissal => dismissal.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<SubscriptionPlan>(entity =>
+        {
+            entity.ToTable("subscription_plans");
+            entity.HasKey(plan => plan.Id);
+            entity.HasIndex(plan => plan.Code).IsUnique();
+            entity.Property(plan => plan.Code).HasMaxLength(80).IsRequired();
+            entity.Property(plan => plan.Name).HasMaxLength(120).IsRequired();
+            entity.Property(plan => plan.Description).HasMaxLength(500).IsRequired();
+            entity.Property(plan => plan.MonthlyPrice).HasPrecision(12, 2);
+            entity.Property(plan => plan.Currency).HasMaxLength(3).IsRequired();
+
+            entity.HasData(
+                CreatePlan("10000000-0000-0000-0000-000000000001", "Free", "Free", "Basic access for early users", 0),
+                CreatePlan("10000000-0000-0000-0000-000000000002", "Pro", "Pro", "More AI requests, projects, and storage", 19),
+                CreatePlan("10000000-0000-0000-0000-000000000003", "InvestorPro", "Investor Pro", "Investor access and advanced discovery", 49),
+                CreatePlan("10000000-0000-0000-0000-000000000004", "Business", "Business", "Business collaboration and analytics", 99));
+        });
+
+        modelBuilder.Entity<UserSubscription>(entity =>
+        {
+            entity.ToTable("user_subscriptions");
+            entity.HasKey(subscription => subscription.Id);
+            entity.HasIndex(subscription => new { subscription.UserId, subscription.Status });
+            entity.HasIndex(subscription => subscription.ProviderSubscriptionId);
+            entity.Property(subscription => subscription.Provider).HasMaxLength(80).IsRequired();
+            entity.Property(subscription => subscription.ProviderSubscriptionId).HasMaxLength(200);
+
+            entity.HasOne(subscription => subscription.User)
+                .WithMany()
+                .HasForeignKey(subscription => subscription.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(subscription => subscription.Plan)
+                .WithMany()
+                .HasForeignKey(subscription => subscription.PlanId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<PaymentTransaction>(entity =>
+        {
+            entity.ToTable("payment_transactions");
+            entity.HasKey(transaction => transaction.Id);
+            entity.HasIndex(transaction => transaction.ProviderCheckoutSessionId);
+            entity.HasIndex(transaction => new { transaction.UserId, transaction.Status });
+            entity.Property(transaction => transaction.Provider).HasMaxLength(80).IsRequired();
+            entity.Property(transaction => transaction.ProviderCheckoutSessionId).HasMaxLength(200).IsRequired();
+            entity.Property(transaction => transaction.ProviderTransactionId).HasMaxLength(200);
+            entity.Property(transaction => transaction.Amount).HasPrecision(12, 2);
+            entity.Property(transaction => transaction.Currency).HasMaxLength(3).IsRequired();
+
+            entity.HasOne(transaction => transaction.User)
+                .WithMany()
+                .HasForeignKey(transaction => transaction.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(transaction => transaction.Plan)
+                .WithMany()
+                .HasForeignKey(transaction => transaction.PlanId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(transaction => transaction.Subscription)
+                .WithMany()
+                .HasForeignKey(transaction => transaction.SubscriptionId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<PaymentWebhookEvent>(entity =>
+        {
+            entity.ToTable("payment_webhook_events");
+            entity.HasKey(webhook => webhook.Id);
+            entity.HasIndex(webhook => new { webhook.Provider, webhook.ProviderEventId }).IsUnique();
+            entity.Property(webhook => webhook.Provider).HasMaxLength(80).IsRequired();
+            entity.Property(webhook => webhook.ProviderEventId).HasMaxLength(200).IsRequired();
+            entity.Property(webhook => webhook.EventType).HasMaxLength(120).IsRequired();
+            entity.Property(webhook => webhook.PayloadJson).HasColumnType("jsonb").IsRequired();
+            entity.Property(webhook => webhook.ProcessingError).HasMaxLength(1000);
+        });
+
+        modelBuilder.Entity<UsageQuota>(entity =>
+        {
+            entity.ToTable("usage_quotas");
+            entity.HasKey(quota => quota.Id);
+            entity.HasIndex(quota => new { quota.PlanId, quota.ResourceKey }).IsUnique();
+            entity.Property(quota => quota.ResourceKey).HasMaxLength(120).IsRequired();
+
+            entity.HasOne(quota => quota.Plan)
+                .WithMany()
+                .HasForeignKey(quota => quota.PlanId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasData(
+                CreateQuota("20000000-0000-0000-0000-000000000001", "10000000-0000-0000-0000-000000000001", "ai_requests_monthly", 20),
+                CreateQuota("20000000-0000-0000-0000-000000000002", "10000000-0000-0000-0000-000000000001", "active_projects", 2),
+                CreateQuota("20000000-0000-0000-0000-000000000003", "10000000-0000-0000-0000-000000000001", "file_storage_mb", 100),
+                CreateQuota("20000000-0000-0000-0000-000000000004", "10000000-0000-0000-0000-000000000002", "ai_requests_monthly", 200),
+                CreateQuota("20000000-0000-0000-0000-000000000005", "10000000-0000-0000-0000-000000000002", "active_projects", 10),
+                CreateQuota("20000000-0000-0000-0000-000000000006", "10000000-0000-0000-0000-000000000002", "file_storage_mb", 2048),
+                CreateQuota("20000000-0000-0000-0000-000000000007", "10000000-0000-0000-0000-000000000003", "investor_access", 1),
+                CreateQuota("20000000-0000-0000-0000-000000000008", "10000000-0000-0000-0000-000000000003", "advanced_analytics", 1),
+                CreateQuota("20000000-0000-0000-0000-000000000009", "10000000-0000-0000-0000-000000000004", "active_projects", 50),
+                CreateQuota("20000000-0000-0000-0000-000000000010", "10000000-0000-0000-0000-000000000004", "file_storage_mb", 10240),
+                CreateQuota("20000000-0000-0000-0000-000000000011", "10000000-0000-0000-0000-000000000004", "advanced_analytics", 1));
         });
 
         modelBuilder.Entity<ProjectApplication>(entity =>
@@ -612,6 +880,146 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasOne(history => history.ChangedByUser)
                 .WithMany()
                 .HasForeignKey(history => history.ChangedByUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<ProjectInterview>(entity =>
+        {
+            entity.ToTable("project_interviews");
+            entity.HasKey(interview => interview.Id);
+            entity.HasIndex(interview => new { interview.ApplicationId, interview.StartAt });
+            entity.HasIndex(interview => new { interview.ProjectId, interview.StartAt });
+            entity.Property(interview => interview.TimeZone).HasMaxLength(120).IsRequired();
+            entity.Property(interview => interview.MeetingUrl).HasMaxLength(1000);
+            entity.Property(interview => interview.Location).HasMaxLength(500);
+            entity.Property(interview => interview.Note).HasMaxLength(2000);
+            entity.Property(interview => interview.CancellationReason).HasMaxLength(1000);
+
+            entity.HasOne(interview => interview.Application)
+                .WithMany()
+                .HasForeignKey(interview => interview.ApplicationId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(interview => interview.Project)
+                .WithMany()
+                .HasForeignKey(interview => interview.ProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(interview => interview.ScheduledByUser)
+                .WithMany()
+                .HasForeignKey(interview => interview.ScheduledByUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<InterviewParticipant>(entity =>
+        {
+            entity.ToTable("interview_participants");
+            entity.HasKey(participant => participant.Id);
+            entity.HasIndex(participant => new { participant.InterviewId, participant.UserId }).IsUnique();
+
+            entity.HasOne(participant => participant.Interview)
+                .WithMany()
+                .HasForeignKey(participant => participant.InterviewId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(participant => participant.User)
+                .WithMany()
+                .HasForeignKey(participant => participant.UserId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<InterviewStatusHistory>(entity =>
+        {
+            entity.ToTable("interview_status_histories");
+            entity.HasKey(history => history.Id);
+            entity.HasIndex(history => new { history.InterviewId, history.CreatedAt });
+            entity.Property(history => history.Reason).HasMaxLength(1000);
+
+            entity.HasOne(history => history.Interview)
+                .WithMany()
+                .HasForeignKey(history => history.InterviewId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(history => history.ChangedByUser)
+                .WithMany()
+                .HasForeignKey(history => history.ChangedByUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<Conversation>(entity =>
+        {
+            entity.ToTable("conversations");
+            entity.HasKey(conversation => conversation.Id);
+            entity.HasIndex(conversation => new { conversation.Type, conversation.ProjectId, conversation.ApplicationId, conversation.InvestorInterestId });
+            entity.Property(conversation => conversation.Title).HasMaxLength(200);
+        });
+
+        modelBuilder.Entity<ConversationParticipant>(entity =>
+        {
+            entity.ToTable("conversation_participants");
+            entity.HasKey(participant => participant.Id);
+            entity.HasIndex(participant => new { participant.ConversationId, participant.UserId }).IsUnique();
+
+            entity.HasOne(participant => participant.Conversation)
+                .WithMany()
+                .HasForeignKey(participant => participant.ConversationId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(participant => participant.User)
+                .WithMany()
+                .HasForeignKey(participant => participant.UserId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<Message>(entity =>
+        {
+            entity.ToTable("messages");
+            entity.HasKey(message => message.Id);
+            entity.HasIndex(message => new { message.ConversationId, message.CreatedAt });
+            entity.Property(message => message.Content).HasMaxLength(4000).IsRequired();
+
+            entity.HasOne(message => message.Conversation)
+                .WithMany()
+                .HasForeignKey(message => message.ConversationId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(message => message.SenderUser)
+                .WithMany()
+                .HasForeignKey(message => message.SenderUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<MessageAttachment>(entity =>
+        {
+            entity.ToTable("message_attachments");
+            entity.HasKey(attachment => attachment.Id);
+            entity.HasIndex(attachment => new { attachment.MessageId, attachment.FileId }).IsUnique();
+
+            entity.HasOne(attachment => attachment.Message)
+                .WithMany()
+                .HasForeignKey(attachment => attachment.MessageId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(attachment => attachment.File)
+                .WithMany()
+                .HasForeignKey(attachment => attachment.FileId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<MessageReadReceipt>(entity =>
+        {
+            entity.ToTable("message_read_receipts");
+            entity.HasKey(receipt => receipt.Id);
+            entity.HasIndex(receipt => new { receipt.MessageId, receipt.UserId }).IsUnique();
+
+            entity.HasOne(receipt => receipt.Message)
+                .WithMany()
+                .HasForeignKey(receipt => receipt.MessageId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(receipt => receipt.User)
+                .WithMany()
+                .HasForeignKey(receipt => receipt.UserId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
@@ -726,6 +1134,33 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             Id = Guid.Parse(id),
             Name = name,
             NormalizedName = normalizedName,
+            CreatedAt = DateTimeOffset.UnixEpoch
+        };
+    }
+
+    private static SubscriptionPlan CreatePlan(string id, string code, string name, string description, decimal monthlyPrice)
+    {
+        return new SubscriptionPlan
+        {
+            Id = Guid.Parse(id),
+            Code = code,
+            Name = name,
+            Description = description,
+            MonthlyPrice = monthlyPrice,
+            Currency = "USD",
+            IsActive = true,
+            CreatedAt = DateTimeOffset.UnixEpoch
+        };
+    }
+
+    private static UsageQuota CreateQuota(string id, string planId, string resourceKey, int limit)
+    {
+        return new UsageQuota
+        {
+            Id = Guid.Parse(id),
+            PlanId = Guid.Parse(planId),
+            ResourceKey = resourceKey,
+            Limit = limit,
             CreatedAt = DateTimeOffset.UnixEpoch
         };
     }

@@ -1,13 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { FileText } from "lucide-react";
 import { RoleGuard } from "@/components/auth/role-guard";
-import { MockNotice } from "@/components/admin/mock-notice";
+import { LoadingState } from "@/components/common/loading-state";
 import { Badge } from "@/components/ui/badge";
 import { Panel, PanelBody } from "@/components/ui/panel";
+import { EmptyState } from "@/components/workspace/empty-state";
 import { SystemRoles } from "@/lib/constants";
-import { mockService } from "@/services";
-import type { AuditLogDto } from "@/types/admin";
+import { adminService } from "@/services";
+import type { AdminAuditLogDto } from "@/types/admin";
 
 export default function AdminAuditLogsPage() {
   return (
@@ -18,23 +20,28 @@ export default function AdminAuditLogsPage() {
 }
 
 function AdminAuditLogs() {
-  const [logs, setLogs] = useState<AuditLogDto[]>([]);
+  const [logs, setLogs] = useState<AdminAuditLogDto[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     async function loadLogs() {
-      setLogs(await mockService.getAuditLogs());
+      const response = await adminService.listAuditLogs(1, 50);
+      setLogs(response.items);
+      setIsLoading(false);
     }
 
     void loadLogs();
   }, []);
 
+  if (isLoading) return <LoadingState label="Loading audit logs" />;
+
   return (
     <div className="space-y-5">
       <div>
         <h1 className="text-2xl font-semibold">Audit Logs</h1>
-        <p className="mt-2 text-sm text-muted-foreground">Audit log UI remains mock-backed until public audit endpoints exist.</p>
+        <p className="mt-2 text-sm text-muted-foreground">Backend audit trail for admin and moderation actions.</p>
       </div>
-      <MockNotice label="Audit logs" />
+      {logs.length === 0 ? <EmptyState icon={FileText} title="No audit logs" description="The backend did not return any audit events yet." /> : null}
       <div className="grid gap-3">
         {logs.map((log) => (
           <Panel key={log.id}>

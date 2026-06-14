@@ -86,6 +86,19 @@ export enum ReportStatus {
   Dismissed = 'Dismissed',
   Resolved = 'Resolved',
   Escalated = 'Escalated',
+  Investigating = 'Investigating',
+}
+
+export enum ReportReasonCode {
+  Spam = 'Spam',
+  Scam = 'Scam',
+  Harassment = 'Harassment',
+  HateSpeech = 'HateSpeech',
+  InappropriateContent = 'InappropriateContent',
+  CopyrightViolation = 'CopyrightViolation',
+  FakeInformation = 'FakeInformation',
+  PrivacyViolation = 'PrivacyViolation',
+  Other = 'Other',
 }
 
 export enum AIRequestType {

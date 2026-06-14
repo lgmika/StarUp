@@ -78,7 +78,7 @@ function ModeratorDashboard() {
             Open pending queue
           </Link>
           <Link className="inline-flex h-10 items-center rounded-md border border-border px-4 text-sm font-medium hover:bg-accent" href="/moderator/reports">
-            Reports placeholder
+            Open reports queue
           </Link>
         </PanelBody>
       </Panel>

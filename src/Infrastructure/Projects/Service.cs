@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using StartupConnect.Application.Projects.Dtos;
 using StartupConnect.Application.Projects.Interfaces;
+using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Constants;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
@@ -13,7 +14,9 @@ using StartupConnect.Shared.Responses;
 
 namespace StartupConnect.Infrastructure.Projects;
 
-public sealed class ProjectService(AppDbContext dbContext) : IProjectService
+public sealed class ProjectService(
+    AppDbContext dbContext,
+    IRealtimeNotifier realtimeNotifier) : IProjectService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -83,6 +86,7 @@ public sealed class ProjectService(AppDbContext dbContext) : IProjectService
         });
 
         AddAudit(userId, "Project.CreateDraft", "Project", project.Id);
+        AddActivity(project, userId, ActivityType.ProjectCreated, ActivityVisibility.Private, "Project draft created", $"Project {project.Title} was created as a draft.", "Project", project.Id);
         await dbContext.SaveChangesAsync(cancellationToken);
         await AddVersionAsync(project.Id, userId, "Draft created", cancellationToken);
 
@@ -123,6 +127,7 @@ public sealed class ProjectService(AppDbContext dbContext) : IProjectService
         await ReplaceRequiredSkillsAsync(project.Id, request.RequiredSkillIds, cancellationToken);
 
         AddAudit(userId, "Project.Update", "Project", project.Id);
+        AddActivity(project, userId, ActivityType.ProjectUpdated, GetProjectUpdateActivityVisibility(project.Status, request.Visibility), "Project updated", $"Project {project.Title} was updated.", "Project", project.Id);
         await dbContext.SaveChangesAsync(cancellationToken);
         await AddVersionAsync(project.Id, userId, "Project updated", cancellationToken);
 
@@ -142,6 +147,7 @@ public sealed class ProjectService(AppDbContext dbContext) : IProjectService
         project.UpdatedAt = DateTimeOffset.UtcNow;
         AddAudit(userId, "Project.Delete", "Project", project.Id);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await realtimeNotifier.ProjectStatusChangedAsync(project.Id, MapSummary(project), cancellationToken);
     }
 
     public async Task SubmitReviewAsync(ClaimsPrincipal principal, Guid projectId, CancellationToken cancellationToken)
@@ -165,6 +171,7 @@ public sealed class ProjectService(AppDbContext dbContext) : IProjectService
         AddAudit(userId, "Project.SubmitReview", "Project", project.Id);
         await dbContext.SaveChangesAsync(cancellationToken);
         await AddVersionAsync(project.Id, userId, "Submitted for review", cancellationToken);
+        await realtimeNotifier.ProjectStatusChangedAsync(project.Id, MapSummary(project), cancellationToken);
     }
 
     public async Task CloseProjectAsync(ClaimsPrincipal principal, Guid projectId, CancellationToken cancellationToken)
@@ -180,6 +187,7 @@ public sealed class ProjectService(AppDbContext dbContext) : IProjectService
         project.UpdatedAt = DateTimeOffset.UtcNow;
         AddAudit(userId, "Project.Close", "Project", project.Id);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await realtimeNotifier.ProjectStatusChangedAsync(project.Id, MapSummary(project), cancellationToken);
     }
 
     public async Task<IReadOnlyCollection<ProjectSummaryDto>> GetOwnedProjectsAsync(ClaimsPrincipal principal, CancellationToken cancellationToken)
@@ -491,6 +499,28 @@ public sealed class ProjectService(AppDbContext dbContext) : IProjectService
             ResourceType = resourceType,
             ResourceId = resourceId
         });
+    }
+
+    private void AddActivity(Project project, Guid actorUserId, ActivityType type, ActivityVisibility visibility, string title, string? message, string targetType, Guid targetId)
+    {
+        dbContext.Activities.Add(new Activity
+        {
+            Project = project,
+            ActorUserId = actorUserId,
+            Type = type,
+            Visibility = visibility,
+            Title = title,
+            Message = message,
+            TargetType = targetType,
+            TargetId = targetId
+        });
+    }
+
+    private static ActivityVisibility GetProjectUpdateActivityVisibility(ProjectStatus status, ProjectVisibility visibility)
+    {
+        return status == ProjectStatus.Published && visibility is ProjectVisibility.Public or ProjectVisibility.Limited
+            ? ActivityVisibility.Public
+            : ActivityVisibility.MembersOnly;
     }
 
     private static void ValidateDraft(CreateProjectDraftRequest request)

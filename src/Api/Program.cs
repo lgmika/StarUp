@@ -1,20 +1,41 @@
 using System.Text;
+using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
 using StartupConnect.Api.Authorization;
 using StartupConnect.Api.Extensions;
+using StartupConnect.Api.Hubs;
 using StartupConnect.Api.Middlewares;
+using StartupConnect.Api.Observability;
+using StartupConnect.Api.Realtime;
+using StartupConnect.Api.Security;
 using StartupConnect.Application;
+using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Constants;
 using StartupConnect.Infrastructure;
 using StartupConnect.Infrastructure.Persistence;
+using StartupConnect.Shared.Responses;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Services.Configure<ObservabilityOptions>(builder.Configuration.GetSection("Observability"));
+var observabilityOptions = builder.Configuration.GetSection("Observability").Get<ObservabilityOptions>() ?? new ObservabilityOptions();
+if (observabilityOptions.UseJsonConsole)
+{
+    builder.Logging.ClearProviders();
+    builder.Logging.AddJsonConsole();
+}
+
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
+builder.Services.Configure<StartupConnectSecurityOptions>(builder.Configuration.GetSection("Security"));
+builder.Services.Configure<ApiRateLimitOptions>(builder.Configuration.GetSection("RateLimiting"));
+SecurityConfigurationValidator.Validate(builder.Configuration, builder.Environment);
 
 // CORS
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ??
@@ -36,7 +57,82 @@ builder.Services.AddCors(options =>
 });
 
 builder.Services.AddEndpointsApiExplorer();
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
 builder.Services.AddOpenApi();
+builder.Services.AddSignalR();
+builder.Services.AddMemoryCache();
+builder.Services.AddScoped<IRealtimeNotifier, SignalRRealtimeNotifier>();
+var rateLimitOptions = builder.Configuration.GetSection("RateLimiting").Get<ApiRateLimitOptions>() ?? new ApiRateLimitOptions();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        context.HttpContext.Response.ContentType = "application/json";
+        var retryAfter = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var delay)
+            ? delay.TotalSeconds.ToString("0")
+            : null;
+        if (retryAfter is not null)
+        {
+            context.HttpContext.Response.Headers.RetryAfter = retryAfter;
+        }
+
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            ErrorResponse.Fail("Too many requests", [new ErrorDetail("RateLimitExceeded", "Please retry later", null)]),
+            cancellationToken);
+    };
+
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+    {
+        if (!rateLimitOptions.Enabled)
+        {
+            return RateLimitPartition.GetNoLimiter("disabled");
+        }
+
+        var path = httpContext.Request.Path;
+        var permitLimit = rateLimitOptions.PermitLimit;
+        var windowSeconds = rateLimitOptions.WindowSeconds;
+
+        if (path.StartsWithSegments("/api/v1/auth"))
+        {
+            permitLimit = rateLimitOptions.AuthPermitLimit;
+            windowSeconds = rateLimitOptions.AuthWindowSeconds;
+        }
+        else if (path.StartsWithSegments("/api/v1/webhooks"))
+        {
+            permitLimit = rateLimitOptions.WebhookPermitLimit;
+            windowSeconds = rateLimitOptions.WebhookWindowSeconds;
+        }
+
+        var partitionKey = httpContext.User.Identity?.IsAuthenticated == true
+            ? $"user:{httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? httpContext.User.FindFirst("sub")?.Value}"
+            : $"ip:{httpContext.Connection.RemoteIpAddress}";
+
+        return RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = permitLimit,
+            Window = TimeSpan.FromSeconds(windowSeconds),
+            QueueLimit = rateLimitOptions.QueueLimit,
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst
+        });
+    });
+});
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+
+    var knownProxies = builder.Configuration.GetSection("Security:KnownProxies").Get<string[]>() ?? [];
+    foreach (var proxy in knownProxies)
+    {
+        if (System.Net.IPAddress.TryParse(proxy, out var address))
+        {
+            options.KnownProxies.Add(address);
+        }
+    }
+});
 builder.Services.AddSwaggerGen(options =>
 {
     options.SwaggerDoc("v1", new OpenApiInfo
@@ -67,6 +163,21 @@ builder.Services
             RoleClaimType = System.Security.Claims.ClaimTypes.Role,
             NameClaimType = System.Security.Claims.ClaimTypes.Name
         };
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                var path = context.HttpContext.Request.Path;
+                if (!string.IsNullOrWhiteSpace(accessToken) &&
+                    (path.StartsWithSegments("/hubs/startupconnect") || path.StartsWithSegments("/hubs/realtime")))
+                {
+                    context.Token = accessToken;
+                }
+
+                return Task.CompletedTask;
+            }
+        };
     });
 
 builder.Services.AddAuthorization(options =>
@@ -95,11 +206,14 @@ builder.Services
     .AddDbContextCheck<AppDbContext>("postgresql");
 
 var app = builder.Build();
+var securityOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<StartupConnectSecurityOptions>>().Value;
 
 app.UseMiddleware<GlobalExceptionMiddleware>();
+app.UseMiddleware<RequestLoggingMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {
+    await DevelopmentDataSeeder.SeedDevelopmentDataAsync(app.Services);
     app.MapOpenApi();
     app.UseSwagger();
     app.UseSwaggerUI(options =>
@@ -109,9 +223,19 @@ if (app.Environment.IsDevelopment())
     });
 }
 
-app.UseHttpsRedirection();
+if (securityOptions.UseForwardedHeaders)
+{
+    app.UseForwardedHeaders();
+}
+
+if (!app.Environment.IsDevelopment() && securityOptions.RequireHttpsRedirection)
+{
+    app.UseHttpsRedirection();
+}
+
 app.UseCors();
 app.UseAuthentication();
+app.UseRateLimiter();
 app.UseAuthorization();
 
 app.MapHealthChecks("/api/v1/health", new HealthCheckOptions
@@ -120,7 +244,22 @@ app.MapHealthChecks("/api/v1/health", new HealthCheckOptions
 })
 .WithName("HealthCheck");
 
+app.MapHealthChecks("/api/v1/health/live", new HealthCheckOptions
+{
+    Predicate = _ => false,
+    ResponseWriter = HealthCheckExtensions.WriteStartupConnectHealthResponse
+})
+.WithName("LivenessHealthCheck");
+
+app.MapHealthChecks("/api/v1/health/ready", new HealthCheckOptions
+{
+    ResponseWriter = HealthCheckExtensions.WriteStartupConnectHealthResponse
+})
+.WithName("ReadinessHealthCheck");
+
 app.MapStartupConnectEndpoints();
+app.MapHub<StartupConnectHub>("/hubs/startupconnect");
+app.MapHub<StartupConnectHub>("/hubs/realtime");
 
 app.Run();
 

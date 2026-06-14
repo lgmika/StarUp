@@ -1,14 +1,15 @@
-// Note: Backend admin endpoints are not yet implemented.
-// These types are prepared for future integration.
-
 export interface AdminDashboardDto {
   totalUsers: number;
+  newUsersLast7Days: number;
+  activeUsers: number;
+  verifiedUsers: number;
   totalProjects: number;
-  pendingProjects: number;
-  publishedProjects: number;
+  pendingModeration: number;
   openReports: number;
-  totalInvestorInterests: number;
-  totalApplications: number;
+  applications: number;
+  investors: number;
+  aiRequests: number;
+  storageBytes: number;
 }
 
 export interface AdminUserDto {
@@ -16,25 +17,60 @@ export interface AdminUserDto {
   email: string;
   fullName: string;
   isEmailVerified: boolean;
+  status: string;
   isSuspended: boolean;
+  suspendedUntil?: string | null;
+  suspensionReason?: string | null;
+  bannedAt?: string | null;
+  banReason?: string | null;
+  isDeleted: boolean;
+  lastLoginAt?: string | null;
   roles: string[];
   createdAt: string;
-  lastLoginAt?: string;
 }
 
-export interface AuditLogDto {
+export interface AdminUserListResponse {
+  items: AdminUserDto[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface AdminRoleDto {
   id: string;
-  actorUserId?: string;
+  code: string;
+  name: string;
+  description?: string | null;
+}
+
+export interface AdminAuditLogDto {
+  id: string;
+  actorUserId?: string | null;
   action: string;
   resourceType: string;
-  resourceId?: string;
-  reason?: string;
-  metadataJson?: string;
-  ipAddress?: string;
-  userAgent?: string;
+  resourceId?: string | null;
+  reason?: string | null;
+  metadataJson?: string | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
   createdAt: string;
 }
 
-export interface AssignRoleRequest {
+export interface AdminAuditLogListResponse {
+  items: AdminAuditLogDto[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface AdminUserStatusRequest {
+  reason: string;
+  suspendedUntil?: string | null;
+}
+
+export interface AdminRoleRequest {
   roleCode: string;
 }
+
+export type AuditLogDto = AdminAuditLogDto;
+export type AssignRoleRequest = AdminRoleRequest;

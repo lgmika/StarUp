@@ -40,6 +40,24 @@ export const projectService = {
     return data.data;
   },
 
+  async listJoinedProjects() {
+    const { data } = await api.get<ApiResponse<ProjectSummaryDto[]>>("/projects/me/joined");
+    return data.data;
+  },
+
+  async listSavedProjects() {
+    const { data } = await api.get<ApiResponse<ProjectSummaryDto[]>>("/users/me/saved-projects");
+    return data.data;
+  },
+
+  async saveProject(projectId: string) {
+    await api.post<ApiResponse<null>>(`/projects/${projectId}/save`);
+  },
+
+  async unsaveProject(projectId: string) {
+    await api.delete<ApiResponse<null>>(`/projects/${projectId}/save`);
+  },
+
   async getProjectVersions(projectId: string) {
     const { data } = await api.get<ApiResponse<ProjectVersionDto[]>>(`/projects/${projectId}/versions`, {
       skipForbiddenRedirect: true,

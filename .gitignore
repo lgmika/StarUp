@@ -9,7 +9,7 @@ TestResults/
 
 .env
 *.log
+backups/
 
 *.db
 *.sqlite
-

@@ -8,6 +8,7 @@ import {
   ContactVisibility,
   ProjectMemberRole,
   ReportStatus,
+  ReportReasonCode,
 } from '@/types/enums';
 
 // System role codes
@@ -144,4 +145,17 @@ export const REPORT_STATUS_LABELS: Record<ReportStatus, string> = {
   [ReportStatus.Dismissed]: 'Dismissed',
   [ReportStatus.Resolved]: 'Resolved',
   [ReportStatus.Escalated]: 'Escalated',
+  [ReportStatus.Investigating]: 'Investigating',
+};
+
+export const REPORT_REASON_LABELS: Record<ReportReasonCode, string> = {
+  [ReportReasonCode.Spam]: 'Spam',
+  [ReportReasonCode.Scam]: 'Scam',
+  [ReportReasonCode.Harassment]: 'Harassment',
+  [ReportReasonCode.HateSpeech]: 'Hate speech',
+  [ReportReasonCode.InappropriateContent]: 'Inappropriate content',
+  [ReportReasonCode.CopyrightViolation]: 'Copyright violation',
+  [ReportReasonCode.FakeInformation]: 'Fake information',
+  [ReportReasonCode.PrivacyViolation]: 'Privacy violation',
+  [ReportReasonCode.Other]: 'Other',
 };

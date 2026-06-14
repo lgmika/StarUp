@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using StartupConnect.Application.Investors.Dtos;
 using StartupConnect.Application.Investors.Interfaces;
 using StartupConnect.Application.Projects.Dtos;
+using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Constants;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
@@ -13,7 +14,9 @@ using StartupConnect.Shared.Responses;
 
 namespace StartupConnect.Infrastructure.Investors;
 
-public sealed class InvestorService(AppDbContext dbContext) : IInvestorService
+public sealed class InvestorService(
+    AppDbContext dbContext,
+    IRealtimeNotifier realtimeNotifier) : IInvestorService
 {
     public async Task<InvestorProfileDto> GetMyProfileAsync(ClaimsPrincipal principal, CancellationToken cancellationToken)
     {
@@ -159,9 +162,12 @@ public sealed class InvestorService(AppDbContext dbContext) : IInvestorService
         dbContext.InvestorProjectInterests.Add(interest);
         AddNotification(project.OwnerUserId, "New investor interest", $"An investor is interested in {project.Title}.", interest.Id, "InvestorProjectInterest");
         AddAudit(userId, "InvestorInterest.Create", "InvestorProjectInterest", interest.Id, null);
+        AddActivity(projectId, userId, ActivityType.InvestorInterestReceived, ActivityVisibility.MembersOnly, "Investor interest received", "A new investor interest was received.", "InvestorProjectInterest", interest.Id);
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        return await GetInterestDtoAsync(interest.Id, cancellationToken);
+        var result = await GetInterestDtoAsync(interest.Id, cancellationToken);
+        await realtimeNotifier.InvestorInterestChangedAsync(projectId, userId, result, cancellationToken);
+        return result;
     }
 
     public async Task<IReadOnlyCollection<InvestorInterestDto>> GetMyInterestsAsync(ClaimsPrincipal principal, CancellationToken cancellationToken)
@@ -224,7 +230,9 @@ public sealed class InvestorService(AppDbContext dbContext) : IInvestorService
         AddAudit(userId, "InvestorInterest.Withdraw", "InvestorProjectInterest", interest.Id, null);
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        return await GetInterestDtoAsync(interest.Id, cancellationToken);
+        var result = await GetInterestDtoAsync(interest.Id, cancellationToken);
+        await realtimeNotifier.InvestorInterestChangedAsync(projectId, interest.InvestorUserId, result, cancellationToken);
+        return result;
     }
 
     private async Task<InvestorInterestDto> FounderDecisionAsync(
@@ -282,7 +290,9 @@ public sealed class InvestorService(AppDbContext dbContext) : IInvestorService
         AddAudit(userId, $"InvestorInterest.{nextStatus}", "InvestorProjectInterest", interest.Id, request.Response);
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        return await GetInterestDtoAsync(interest.Id, cancellationToken);
+        var result = await GetInterestDtoAsync(interest.Id, cancellationToken);
+        await realtimeNotifier.InvestorInterestChangedAsync(projectId, interest.InvestorUserId, result, cancellationToken);
+        return result;
     }
 
     private IQueryable<InvestorProjectInterest> QueryInterests()
@@ -380,6 +390,21 @@ public sealed class InvestorService(AppDbContext dbContext) : IInvestorService
         });
     }
 
+    private void AddActivity(Guid projectId, Guid actorUserId, ActivityType type, ActivityVisibility visibility, string title, string? message, string targetType, Guid targetId)
+    {
+        dbContext.Activities.Add(new Activity
+        {
+            ProjectId = projectId,
+            ActorUserId = actorUserId,
+            Type = type,
+            Visibility = visibility,
+            Title = title,
+            Message = message,
+            TargetType = targetType,
+            TargetId = targetId
+        });
+    }
+
     private static void ValidateProfile(UpsertInvestorProfileRequest request)
     {
         ValidateRequired(request.DisplayName, "displayName", "Display name is required");
@@ -418,4 +443,3 @@ public sealed class InvestorService(AppDbContext dbContext) : IInvestorService
         return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 }
-

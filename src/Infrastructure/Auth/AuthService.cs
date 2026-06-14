@@ -5,8 +5,11 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using StartupConnect.Application.Auth.Dtos;
 using StartupConnect.Application.Auth.Interfaces;
+using StartupConnect.Application.Email.Interfaces;
 using StartupConnect.Domain.Constants;
 using StartupConnect.Domain.Entities;
+using StartupConnect.Domain.Enums;
+using StartupConnect.Infrastructure.Email;
 using StartupConnect.Infrastructure.Persistence;
 using StartupConnect.Shared.Exceptions;
 using StartupConnect.Shared.Responses;
@@ -18,9 +21,12 @@ public sealed class AuthService(
     PasswordHasher passwordHasher,
     SecureTokenGenerator tokenGenerator,
     JwtTokenService jwtTokenService,
-    IOptions<JwtOptions> jwtOptions) : IAuthService
+    IEmailService emailService,
+    IOptions<JwtOptions> jwtOptions,
+    IOptions<EmailOptions> emailOptions) : IAuthService
 {
     private readonly JwtOptions _jwtOptions = jwtOptions.Value;
+    private readonly EmailOptions _emailOptions = emailOptions.Value;
 
     public async Task<AuthResponse> RegisterAsync(RegisterRequest request, string? ipAddress, CancellationToken cancellationToken)
     {
@@ -50,13 +56,14 @@ public sealed class AuthService(
         {
             User = user,
             TokenHash = tokenGenerator.HashToken(verificationToken),
-            ExpiresAt = DateTimeOffset.UtcNow.AddHours(24)
+            ExpiresAt = DateTimeOffset.UtcNow.AddHours(_emailOptions.VerificationTokenHours)
         });
 
         AddAudit(user.Id, "Auth.Register", "User", user.Id, ipAddress, null);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await emailService.SendEmailVerificationAsync(user.Email, BuildVerificationUrl(user.Email, verificationToken), cancellationToken);
 
-        return await CreateAuthResponseAsync(user, ipAddress, cancellationToken, verificationToken);
+        return await CreateAuthResponseAsync(user, ipAddress, cancellationToken);
     }
 
     public async Task<AuthResponse> LoginAsync(LoginRequest request, string? ipAddress, CancellationToken cancellationToken)
@@ -71,10 +78,7 @@ public sealed class AuthService(
             throw new ApiException("Invalid email or password", HttpStatusCode.Unauthorized);
         }
 
-        if (user.IsSuspended)
-        {
-            throw new ApiException("User account is suspended", HttpStatusCode.Forbidden);
-        }
+        EnsureUserCanAuthenticate(user);
 
         user.LastLoginAt = DateTimeOffset.UtcNow;
         user.UpdatedAt = DateTimeOffset.UtcNow;
@@ -100,10 +104,7 @@ public sealed class AuthService(
             throw new ApiException("Invalid refresh token", HttpStatusCode.Unauthorized);
         }
 
-        if (refreshToken.User.IsSuspended)
-        {
-            throw new ApiException("User account is suspended", HttpStatusCode.Forbidden);
-        }
+        EnsureUserCanAuthenticate(refreshToken.User);
 
         var replacementToken = tokenGenerator.CreateToken();
         var replacementHash = tokenGenerator.HashToken(replacementToken);
@@ -176,6 +177,42 @@ public sealed class AuthService(
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task ResendVerificationAsync(ResendVerificationRequest request, CancellationToken cancellationToken)
+    {
+        ValidateEmail(request.Email);
+
+        var normalizedEmail = NormalizeEmail(request.Email);
+        var user = await dbContext.Users.FirstOrDefaultAsync(item => item.NormalizedEmail == normalizedEmail, cancellationToken);
+        if (user is null || user.IsEmailVerified)
+        {
+            return;
+        }
+
+        var resendAfter = DateTimeOffset.UtcNow.AddMinutes(-_emailOptions.ResendCooldownMinutes);
+        var recentTokenExists = await dbContext.EmailVerificationTokens.AnyAsync(
+            token => token.UserId == user.Id &&
+                token.UsedAt == null &&
+                token.CreatedAt >= resendAfter,
+            cancellationToken);
+
+        if (recentTokenExists)
+        {
+            throw new ApiException("Please wait before requesting another verification email", HttpStatusCode.TooManyRequests);
+        }
+
+        var verificationToken = tokenGenerator.CreateToken();
+        dbContext.EmailVerificationTokens.Add(new EmailVerificationToken
+        {
+            UserId = user.Id,
+            TokenHash = tokenGenerator.HashToken(verificationToken),
+            ExpiresAt = DateTimeOffset.UtcNow.AddHours(_emailOptions.VerificationTokenHours)
+        });
+
+        AddAudit(user.Id, "Auth.ResendVerification", "User", user.Id, null, null);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await emailService.SendEmailVerificationAsync(user.Email, BuildVerificationUrl(user.Email, verificationToken), cancellationToken);
+    }
+
     public async Task<ForgotPasswordResponse> ForgotPasswordAsync(ForgotPasswordRequest request, CancellationToken cancellationToken)
     {
         ValidateEmail(request.Email);
@@ -184,7 +221,7 @@ public sealed class AuthService(
         var user = await dbContext.Users.FirstOrDefaultAsync(item => item.NormalizedEmail == normalizedEmail, cancellationToken);
         if (user is null)
         {
-            return new ForgotPasswordResponse("If the email exists, a password reset token has been generated.");
+            return new ForgotPasswordResponse("If the email exists, a password reset email has been sent.");
         }
 
         var resetToken = tokenGenerator.CreateToken();
@@ -192,13 +229,14 @@ public sealed class AuthService(
         {
             UserId = user.Id,
             TokenHash = tokenGenerator.HashToken(resetToken),
-            ExpiresAt = DateTimeOffset.UtcNow.AddHours(1)
+            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(_emailOptions.PasswordResetTokenMinutes)
         });
 
         AddAudit(user.Id, "Auth.ForgotPassword", "User", user.Id, null, null);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await emailService.SendPasswordResetAsync(user.Email, BuildPasswordResetUrl(user.Email, resetToken), cancellationToken);
 
-        return new ForgotPasswordResponse("If the email exists, a password reset token has been generated.", resetToken);
+        return new ForgotPasswordResponse("If the email exists, a password reset email has been sent.");
     }
 
     public async Task ResetPasswordAsync(ResetPasswordRequest request, CancellationToken cancellationToken)
@@ -260,10 +298,7 @@ public sealed class AuthService(
             throw new ApiException("User not found", HttpStatusCode.NotFound);
         }
 
-        if (user.IsSuspended)
-        {
-            throw new ApiException("User account is suspended", HttpStatusCode.Forbidden);
-        }
+        EnsureUserCanAuthenticate(user);
 
         return MapUser(user);
     }
@@ -337,6 +372,34 @@ public sealed class AuthService(
             user.UserRoles.Select(userRole => userRole.Role.Code).Order().ToArray());
     }
 
+    private static void EnsureUserCanAuthenticate(User user)
+    {
+        if (user.IsDeleted || user.Status == UserStatus.Deleted)
+        {
+            throw new ApiException("User account is deleted", HttpStatusCode.Forbidden);
+        }
+
+        if (user.Status == UserStatus.Banned)
+        {
+            throw new ApiException("User account is banned", HttpStatusCode.Forbidden);
+        }
+
+        if (user.IsSuspended || user.Status == UserStatus.Suspended)
+        {
+            if (user.SuspendedUntil.HasValue && user.SuspendedUntil <= DateTimeOffset.UtcNow)
+            {
+                user.IsSuspended = false;
+                user.Status = UserStatus.Active;
+                user.SuspendedUntil = null;
+                user.SuspensionReason = null;
+                user.UpdatedAt = DateTimeOffset.UtcNow;
+                return;
+            }
+
+            throw new ApiException("User account is suspended", HttpStatusCode.Forbidden);
+        }
+    }
+
     private void AddAudit(Guid? actorUserId, string action, string resourceType, Guid? resourceId, string? ipAddress, string? userAgent)
     {
         dbContext.AuditLogs.Add(new AuditLog
@@ -397,5 +460,21 @@ public sealed class AuthService(
     private static string NormalizeEmail(string email)
     {
         return email.Trim().ToUpperInvariant();
+    }
+
+    private string BuildVerificationUrl(string email, string token)
+    {
+        return BuildFrontendUrl("/auth/verify-email", email, token);
+    }
+
+    private string BuildPasswordResetUrl(string email, string token)
+    {
+        return BuildFrontendUrl("/auth/reset-password", email, token);
+    }
+
+    private string BuildFrontendUrl(string path, string email, string token)
+    {
+        var baseUrl = _emailOptions.AppBaseUrl.TrimEnd('/');
+        return $"{baseUrl}{path}?email={Uri.EscapeDataString(email)}&token={Uri.EscapeDataString(token)}";
     }
 }

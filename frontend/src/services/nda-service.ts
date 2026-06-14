@@ -22,4 +22,9 @@ export const ndaService = {
     const { data } = await api.post<ApiResponse<NdaTemplateVersionDto>>(`/nda/templates/${templateId}/versions`, request);
     return data.data;
   },
+
+  async listMyAgreements() {
+    const { data } = await api.get<ApiResponse<import("@/types/nda").NdaAgreementDto[]>>("/users/me/nda-agreements");
+    return data.data;
+  },
 };

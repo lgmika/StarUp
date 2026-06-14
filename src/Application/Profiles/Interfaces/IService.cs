@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using StartupConnect.Application.Files.Dtos;
 using StartupConnect.Application.Profiles.Dtos;
 
 namespace StartupConnect.Application.Profiles.Interfaces;
@@ -25,11 +26,7 @@ public interface IProfileService
 
     Task<CvDto> CreateUploadedCvAsync(
         ClaimsPrincipal principal,
-        string originalFileName,
-        string storedFileName,
-        string storagePath,
-        string contentType,
-        long sizeInBytes,
+        StoredFileResult fileResult,
         CancellationToken cancellationToken);
 
     Task<CvDto> UpdateCvAsync(ClaimsPrincipal principal, Guid cvId, UpdateCvRequest request, CancellationToken cancellationToken);
@@ -38,4 +35,3 @@ public interface IProfileService
 
     Task<PortfolioDto> CreatePortfolioAsync(ClaimsPrincipal principal, CreatePortfolioRequest request, CancellationToken cancellationToken);
 }
-

@@ -3,6 +3,8 @@ using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
 using StartupConnect.Application.Nda.Dtos;
 using StartupConnect.Application.Nda.Interfaces;
+using StartupConnect.Application.Realtime;
+using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Constants;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
@@ -12,7 +14,9 @@ using StartupConnect.Shared.Responses;
 
 namespace StartupConnect.Infrastructure.Nda;
 
-public sealed class NdaService(AppDbContext dbContext) : INdaService
+public sealed class NdaService(
+    AppDbContext dbContext,
+    IRealtimeNotifier realtimeNotifier) : INdaService
 {
     public async Task<IReadOnlyCollection<NdaTemplateDto>> GetTemplatesAsync(CancellationToken cancellationToken)
     {
@@ -168,7 +172,34 @@ public sealed class NdaService(AppDbContext dbContext) : INdaService
         AddAudit(userId, "NDA.Accept", "Project", projectId, null);
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        return MapAgreement(agreement);
+        var result = MapAgreement(agreement);
+        await realtimeNotifier.NotifyProjectAsync(projectId, RealtimeEventNames.NdaAgreementAccepted, result, cancellationToken);
+        await realtimeNotifier.NotifyUserAsync(project.OwnerUserId, RealtimeEventNames.NdaAgreementAccepted, result, cancellationToken);
+        if (pendingInterest is not null)
+        {
+            var interestDto = await dbContext.InvestorProjectInterests
+                .Include(interest => interest.Project)
+                .Include(interest => interest.InvestorUser)
+                .Where(interest => interest.Id == pendingInterest.Id)
+                .Select(interest => new
+                {
+                    interest.Id,
+                    interest.ProjectId,
+                    ProjectTitle = interest.Project.Title,
+                    interest.InvestorUserId,
+                    InvestorEmail = interest.InvestorUser.Email,
+                    interest.Message,
+                    interest.Status,
+                    interest.FounderResponse,
+                    interest.CreatedAt,
+                    interest.UpdatedAt
+                })
+                .FirstAsync(cancellationToken);
+
+            await realtimeNotifier.InvestorInterestChangedAsync(projectId, userId, interestDto, cancellationToken);
+        }
+
+        return result;
     }
 
     public async Task<IReadOnlyCollection<NdaAgreementDto>> GetProjectAgreementsAsync(ClaimsPrincipal principal, Guid projectId, CancellationToken cancellationToken)

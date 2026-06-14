@@ -24,8 +24,67 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
       ASPNETCORE_URLS: ${ASPNETCORE_URLS:-http://+:8080}
+      AllowedHosts: ${ALLOWED_HOSTS:-*}
       ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-startupconnect};Username=${POSTGRES_USER:-startupconnect};Password=${POSTGRES_PASSWORD:-startupconnect_password}
       Jwt__SigningKey: ${JWT_SIGNING_KEY:-DEV_ONLY_StartupConnect_JwtSigningKey_AtLeast32Chars_ReplaceInProduction}
+      Cors__AllowedOrigins__0: ${CORS_ALLOWED_ORIGIN_0:-http://localhost:3000}
+      Cors__AllowedOrigins__1: ${CORS_ALLOWED_ORIGIN_1:-http://localhost:5173}
+      Cors__AllowedOrigins__2: ${CORS_ALLOWED_ORIGIN_2:-http://127.0.0.1:3000}
+      Cors__AllowedOrigins__3: ${CORS_ALLOWED_ORIGIN_3:-http://127.0.0.1:5173}
+      Security__UseForwardedHeaders: ${SECURITY_USE_FORWARDED_HEADERS:-false}
+      Security__RequireHttpsRedirection: ${SECURITY_REQUIRE_HTTPS_REDIRECTION:-false}
+      Security__RefreshTokenCookie__Enabled: ${REFRESH_TOKEN_COOKIE_ENABLED:-false}
+      Security__RefreshTokenCookie__Secure: ${REFRESH_TOKEN_COOKIE_SECURE:-false}
+      Security__RefreshTokenCookie__SameSite: ${REFRESH_TOKEN_COOKIE_SAMESITE:-Lax}
+      Email__Provider: ${EMAIL_PROVIDER:-Development}
+      Email__FromEmail: ${EMAIL_FROM:-no-reply@startupconnect.local}
+      Email__FromName: ${EMAIL_FROM_NAME:-StartupConnect}
+      Email__AppBaseUrl: ${EMAIL_APP_BASE_URL:-http://localhost:3000}
+      Email__VerifiedSenderDomain: ${EMAIL_VERIFIED_SENDER_DOMAIN:-}
+      Email__RequireVerifiedSenderDomain: ${EMAIL_REQUIRE_VERIFIED_SENDER_DOMAIN:-false}
+      Email__DevLogDirectory: ${EMAIL_DEV_LOG_DIRECTORY:-App_Data/emails}
+      Email__Smtp__Host: ${EMAIL_SMTP_HOST:-}
+      Email__Smtp__Port: ${EMAIL_SMTP_PORT:-587}
+      Email__Smtp__EnableSsl: ${EMAIL_SMTP_ENABLE_SSL:-true}
+      Email__Smtp__Username: ${EMAIL_SMTP_USERNAME:-}
+      Email__Smtp__Password: ${EMAIL_SMTP_PASSWORD:-}
+      Email__Smtp__TimeoutSeconds: ${EMAIL_SMTP_TIMEOUT_SECONDS:-30}
+      Email__Smtp__MaxRetryAttempts: ${EMAIL_SMTP_MAX_RETRY_ATTEMPTS:-2}
+      AI__Provider: ${AI_PROVIDER:-Mock}
+      AI__DailyQuota: ${AI_DAILY_QUOTA:-20}
+      AI__Ollama__BaseUrl: ${AI_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      AI__Ollama__Model: ${AI_OLLAMA_MODEL:-llama3.1}
+      AI__Ollama__TimeoutSeconds: ${AI_OLLAMA_TIMEOUT_SECONDS:-120}
+      FileStorage__Provider: ${FILE_STORAGE_PROVIDER:-Local}
+      FileStorage__LocalRootPath: ${FILE_STORAGE_LOCAL_ROOT_PATH:-/app/storage/private}
+      FileStorage__PublicBaseUrl: ${FILE_STORAGE_PUBLIC_BASE_URL:-http://localhost:8080}
+      FileStorage__SignedUrlMinutes: ${FILE_STORAGE_SIGNED_URL_MINUTES:-10}
+      FileStorage__MaxCvBytes: ${FILE_STORAGE_MAX_CV_BYTES:-5242880}
+      FileStorage__SigningKey: ${FILE_STORAGE_SIGNING_KEY:-DEV_ONLY_FileStorageSigningKey_ReplaceInProduction}
+      FileStorage__S3__BucketName: ${FILE_STORAGE_S3_BUCKET:-}
+      FileStorage__S3__Region: ${FILE_STORAGE_S3_REGION:-us-east-1}
+      FileStorage__S3__ServiceUrl: ${FILE_STORAGE_S3_SERVICE_URL:-}
+      FileStorage__S3__AccessKeyId: ${FILE_STORAGE_S3_ACCESS_KEY_ID:-}
+      FileStorage__S3__SecretAccessKey: ${FILE_STORAGE_S3_SECRET_ACCESS_KEY:-}
+      FileStorage__S3__KeyPrefix: ${FILE_STORAGE_S3_KEY_PREFIX:-startupconnect}
+      FileStorage__S3__ForcePathStyle: ${FILE_STORAGE_S3_FORCE_PATH_STYLE:-false}
+      FileStorage__S3__UseServerSideEncryption: ${FILE_STORAGE_S3_USE_SERVER_SIDE_ENCRYPTION:-true}
+      Payments__Provider: ${PAYMENTS_PROVIDER:-Mock}
+      Payments__WebhookSecret: ${PAYMENTS_WEBHOOK_SECRET:-DEV_ONLY_PaymentWebhookSecret_ReplaceInProduction}
+      Payments__CheckoutBaseUrl: ${PAYMENTS_CHECKOUT_BASE_URL:-http://localhost:3000/billing/checkout}
+      Payments__ProductionCheckoutBaseUrl: ${PAYMENTS_PRODUCTION_CHECKOUT_BASE_URL:-}
+      Payments__ApiKey: ${PAYMENTS_API_KEY:-}
+      Observability__EnableRequestLogging: ${OBSERVABILITY_ENABLE_REQUEST_LOGGING:-true}
+      Observability__UseJsonConsole: ${OBSERVABILITY_USE_JSON_CONSOLE:-false}
+      Observability__CorrelationHeaderName: ${OBSERVABILITY_CORRELATION_HEADER_NAME:-X-Correlation-Id}
+      Observability__SlowRequestThresholdMs: ${OBSERVABILITY_SLOW_REQUEST_THRESHOLD_MS:-1000}
+      RateLimiting__Enabled: ${RATE_LIMITING_ENABLED:-true}
+      RateLimiting__PermitLimit: ${RATE_LIMITING_PERMIT_LIMIT:-120}
+      RateLimiting__WindowSeconds: ${RATE_LIMITING_WINDOW_SECONDS:-60}
+      RateLimiting__AuthPermitLimit: ${RATE_LIMITING_AUTH_PERMIT_LIMIT:-20}
+      RateLimiting__AuthWindowSeconds: ${RATE_LIMITING_AUTH_WINDOW_SECONDS:-60}
+      RateLimiting__WebhookPermitLimit: ${RATE_LIMITING_WEBHOOK_PERMIT_LIMIT:-300}
+      RateLimiting__WebhookWindowSeconds: ${RATE_LIMITING_WEBHOOK_WINDOW_SECONDS:-60}
     ports:
       - "8080:8080"
     depends_on:
