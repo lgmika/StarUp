@@ -76,3 +76,18 @@ export function getPrimaryRole(roles: string[]): string {
 
   return SystemRoles.Guest;
 }
+
+export function getRoleHome(roles: string[]): string {
+  switch (getPrimaryRole(roles)) {
+    case SystemRoles.Admin:
+      return '/admin';
+    case SystemRoles.Moderator:
+      return '/moderator';
+    case SystemRoles.Investor:
+      return '/investor';
+    case SystemRoles.Business:
+      return '/projects/me/owned';
+    default:
+      return '/dashboard';
+  }
+}

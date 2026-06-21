@@ -2,7 +2,6 @@ using System.Net;
 using System.Net.Mail;
 using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
-using StartupConnect.Application.Email.Interfaces;
 using StartupConnect.Application.Email.Models;
 using StartupConnect.Application.ProjectTeams.Dtos;
 using StartupConnect.Application.ProjectTeams.Interfaces;
@@ -18,7 +17,7 @@ namespace StartupConnect.Infrastructure.ProjectTeams;
 
 public sealed class ProjectTeamService(
     AppDbContext dbContext,
-    IEmailService emailService,
+    EmailOutboxDispatcher emailOutboxDispatcher,
     SecureTokenGenerator tokenGenerator) : IProjectTeamService
 {
     public async Task<IReadOnlyCollection<ProjectMemberDto>> GetMembersAsync(ClaimsPrincipal principal, Guid projectId, CancellationToken cancellationToken)
@@ -44,6 +43,7 @@ public sealed class ProjectTeamService(
     {
         var actorUserId = GetUserId(principal);
         ValidateReason(request.Reason);
+        ValidateMemberRole(request.Role, allowFounder: false);
         await EnsureCanManageProjectAsync(projectId, actorUserId, cancellationToken);
         var member = await GetMemberAsync(projectId, memberId, cancellationToken);
 
@@ -86,9 +86,10 @@ public sealed class ProjectTeamService(
         var actorUserId = GetUserId(principal);
         await EnsureCanManageProjectAsync(projectId, actorUserId, cancellationToken);
         ValidateEmail(request.Email);
-        if (request.Role == ProjectMemberRole.Founder)
+        ValidateMemberRole(request.Role, allowFounder: false);
+        if (request.Message?.Trim().Length > 1000)
         {
-            throw new ApiException("Founder role cannot be invited directly", HttpStatusCode.BadRequest);
+            throw new ValidationException([new ErrorDetail("MessageTooLong", "Invitation message must be at most 1000 characters", "message")]);
         }
 
         var normalizedEmail = NormalizeEmail(request.Email);
@@ -121,11 +122,21 @@ public sealed class ProjectTeamService(
         };
 
         dbContext.ProjectInvitations.Add(invitation);
+        var projectName = await dbContext.Projects
+            .Where(project => project.Id == projectId)
+            .Select(project => project.Title)
+            .FirstAsync(cancellationToken);
+        emailOutboxDispatcher.QueueProjectInvitation(
+            invitedUser?.Id,
+            invitation.Email,
+            new ProjectInvitationEmailModel(
+                projectName,
+                "StartupConnect team",
+                request.Role.ToString(),
+                $"/project-invitations/{invitation.Id}",
+                invitation.Message));
         AddAudit(actorUserId, "ProjectInvitation.Create", "Project", projectId, request.Email);
         await dbContext.SaveChangesAsync(cancellationToken);
-
-        var projectName = await dbContext.Projects.Where(project => project.Id == projectId).Select(project => project.Title).FirstAsync(cancellationToken);
-        await emailService.SendProjectInvitationAsync(invitation.Email, new ProjectInvitationEmailModel(projectName, "StartupConnect team", request.Role.ToString(), $"/project-invitations/{invitation.Id}", invitation.Message), cancellationToken);
 
         return MapInvitation(invitation);
     }
@@ -391,8 +402,32 @@ public sealed class ProjectTeamService(
 
     private static void ValidateEmail(string email)
     {
-        try { _ = new MailAddress(email); }
-        catch { throw new ValidationException([new ErrorDetail("InvalidEmail", "Email is invalid", "email")]); }
+        if (string.IsNullOrWhiteSpace(email) || email.Trim().Length > 255)
+        {
+            throw new ValidationException([new ErrorDetail("InvalidEmail", "Email is invalid", "email")]);
+        }
+
+        try
+        {
+            var normalizedInput = email.Trim();
+            var parsed = new MailAddress(normalizedInput);
+            if (!parsed.Address.Equals(normalizedInput, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new FormatException();
+            }
+        }
+        catch (FormatException)
+        {
+            throw new ValidationException([new ErrorDetail("InvalidEmail", "Email is invalid", "email")]);
+        }
+    }
+
+    private static void ValidateMemberRole(ProjectMemberRole role, bool allowFounder)
+    {
+        if (!Enum.IsDefined(role) || (!allowFounder && role == ProjectMemberRole.Founder))
+        {
+            throw new ValidationException([new ErrorDetail("InvalidRole", "Project member role is invalid", "role")]);
+        }
     }
 
     private static string NormalizeEmail(string email) => email.Trim().ToUpperInvariant();

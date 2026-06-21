@@ -14,6 +14,7 @@ export const projectService = {
     const keyword = search?.trim();
     const { data } = await api.get<ApiResponse<ProjectSummaryDto[]>>("/projects", {
       params: keyword ? { search: keyword } : undefined,
+      allowAnonymousFallback: true,
     });
     return data.data;
   },
@@ -21,6 +22,7 @@ export const projectService = {
   async getProject(projectId: string) {
     const { data } = await api.get<ApiResponse<ProjectDetailDto>>(`/projects/${projectId}`, {
       skipForbiddenRedirect: true,
+      allowAnonymousFallback: true,
     });
     return data.data;
   },

@@ -26,6 +26,10 @@ public sealed class MockPaymentProvider(IOptions<PaymentOptions> optionsAccessor
         return Task.FromResult(new PaymentCheckoutSession(sessionId, checkoutUrl));
     }
 
+    public Task CancelSubscriptionAsync(string? providerSubscriptionId, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task ResumeSubscriptionAsync(string? providerSubscriptionId, CancellationToken cancellationToken) => Task.CompletedTask;
+
     public bool VerifyWebhookSignature(string payloadJson, string? signature)
     {
         if (string.IsNullOrWhiteSpace(signature))

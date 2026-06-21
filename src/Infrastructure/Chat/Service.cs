@@ -34,19 +34,48 @@ public sealed class ChatService(
     public async Task<ConversationDto> CreateConversationAsync(ClaimsPrincipal principal, CreateConversationRequest request, CancellationToken cancellationToken)
     {
         var actorUserId = GetUserId(principal);
+        if (request.ParticipantUserIds is null)
+        {
+            throw new ValidationException([new ErrorDetail("ParticipantsRequired", "Conversation participants are required", "participantUserIds")]);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Title) && request.Title.Trim().Length > 200)
+        {
+            throw new ValidationException([new ErrorDetail("TitleTooLong", "Conversation title must be at most 200 characters", "title")]);
+        }
+
         var participantIds = request.ParticipantUserIds.Where(id => id != Guid.Empty).Append(actorUserId).Distinct().ToArray();
         if (participantIds.Length < 2)
         {
             throw new ValidationException([new ErrorDetail("ParticipantsRequired", "Conversation requires at least two participants", "participantUserIds")]);
         }
 
+        if (participantIds.Length > 100)
+        {
+            throw new ValidationException([new ErrorDetail("TooManyParticipants", "Conversation supports at most 100 participants", "participantUserIds")]);
+        }
+
         await EnsureCanCreateConversationAsync(actorUserId, request, participantIds, cancellationToken);
+        await using var directTransaction = request.Type == ConversationType.Direct
+            ? await dbContext.Database.BeginTransactionAsync(cancellationToken)
+            : null;
+
+        if (directTransaction is not null)
+        {
+            var lockResource = string.Join(':', participantIds.Order());
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({lockResource}, 0))",
+                cancellationToken);
+        }
+
         var duplicateDirect = request.Type == ConversationType.Direct
             ? await FindDuplicateDirectConversationAsync(participantIds, cancellationToken)
             : null;
         if (duplicateDirect is not null)
         {
-            return await MapConversationAsync(duplicateDirect.Id, cancellationToken);
+            var existingResult = await MapConversationAsync(duplicateDirect.Id, cancellationToken);
+            await directTransaction!.CommitAsync(cancellationToken);
+            return existingResult;
         }
 
         var conversation = new Conversation
@@ -70,6 +99,11 @@ public sealed class ChatService(
 
         AddAudit(actorUserId, "Conversation.Create", "Conversation", conversation.Id, conversation.Type.ToString());
         await dbContext.SaveChangesAsync(cancellationToken);
+        if (directTransaction is not null)
+        {
+            await directTransaction.CommitAsync(cancellationToken);
+        }
+
         var result = await MapConversationAsync(conversation.Id, cancellationToken);
         foreach (var participantId in participantIds)
         {
@@ -82,9 +116,14 @@ public sealed class ChatService(
     public async Task<IReadOnlyCollection<ConversationDto>> GetMyConversationsAsync(ClaimsPrincipal principal, CancellationToken cancellationToken)
     {
         var userId = GetUserId(principal);
-        var ids = await dbContext.ConversationParticipants
-            .Where(participant => participant.UserId == userId)
-            .Select(participant => participant.ConversationId)
+        var ids = await dbContext.Conversations
+            .Where(conversation => dbContext.ConversationParticipants.Any(participant =>
+                participant.ConversationId == conversation.Id && participant.UserId == userId))
+            .OrderByDescending(conversation => dbContext.Messages
+                .Where(message => message.ConversationId == conversation.Id)
+                .Max(message => (DateTimeOffset?)message.CreatedAt) ?? conversation.CreatedAt)
+            .Take(100)
+            .Select(conversation => conversation.Id)
             .ToArrayAsync(cancellationToken);
 
         var result = new List<ConversationDto>();
@@ -169,21 +208,19 @@ public sealed class ChatService(
         var now = DateTimeOffset.UtcNow;
         participant.LastReadAt = now;
         participant.UpdatedAt = now;
-        var unreadMessages = await dbContext.Messages
-            .Where(message => message.ConversationId == conversationId && message.SenderUserId != userId && message.CreatedAt <= now)
-            .Select(message => message.Id)
-            .ToArrayAsync(cancellationToken);
-
-        foreach (var messageId in unreadMessages)
-        {
-            var exists = await dbContext.MessageReadReceipts.AnyAsync(receipt => receipt.MessageId == messageId && receipt.UserId == userId, cancellationToken);
-            if (!exists)
-            {
-                dbContext.MessageReadReceipts.Add(new MessageReadReceipt { MessageId = messageId, UserId = userId, ReadAt = now });
-            }
-        }
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO message_read_receipts ("Id", "MessageId", "UserId", "ReadAt", "CreatedAt", "UpdatedAt")
+            SELECT gen_random_uuid(), message."Id", {userId}, {now}, {now}, NULL
+            FROM messages AS message
+            WHERE message."ConversationId" = {conversationId}
+              AND message."SenderUserId" <> {userId}
+              AND message."CreatedAt" <= {now}
+            ON CONFLICT ("MessageId", "UserId") DO NOTHING
+            """, cancellationToken);
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         await realtimeNotifier.MessageReadAsync(conversationId, userId, cancellationToken);
     }
 
@@ -239,22 +276,13 @@ public sealed class ChatService(
     private async Task<Conversation?> FindDuplicateDirectConversationAsync(IReadOnlyCollection<Guid> participantIds, CancellationToken cancellationToken)
     {
         if (participantIds.Count != 2) return null;
-        var conversations = await dbContext.Conversations
-            .Where(conversation => conversation.Type == ConversationType.Direct)
-            .ToArrayAsync(cancellationToken);
-        foreach (var conversation in conversations)
-        {
-            var ids = await dbContext.ConversationParticipants
-                .Where(participant => participant.ConversationId == conversation.Id)
-                .Select(participant => participant.UserId)
-                .ToArrayAsync(cancellationToken);
-            if (ids.Length == 2 && ids.Order().SequenceEqual(participantIds.Order()))
-            {
-                return conversation;
-            }
-        }
-
-        return null;
+        return await dbContext.Conversations.FirstOrDefaultAsync(
+            conversation =>
+                conversation.Type == ConversationType.Direct &&
+                dbContext.ConversationParticipants.Count(participant => participant.ConversationId == conversation.Id) == 2 &&
+                dbContext.ConversationParticipants.All(participant =>
+                    participant.ConversationId != conversation.Id || participantIds.Contains(participant.UserId)),
+            cancellationToken);
     }
 
     private async Task EnsureParticipantAsync(Guid conversationId, Guid userId, CancellationToken cancellationToken)
@@ -333,7 +361,7 @@ public sealed class ChatService(
         {
             await notificationService.CreateAsync(new CreateNotificationRequest(
                 participantId,
-                NotificationType.System,
+                NotificationType.Chat,
                 "New message",
                 $"New message from {senderEmail}.",
                 "Message",

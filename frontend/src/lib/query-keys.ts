@@ -1,0 +1,15 @@
+export const queryKeys = {
+  auth: ["auth"] as const,
+  dashboard: ["dashboard"] as const,
+  projects: ["projects"] as const,
+  applications: ["applications"] as const,
+  investorInterests: ["investor-interests"] as const,
+  interviews: ["interviews"] as const,
+  conversations: ["conversations"] as const,
+  notifications: ["notifications"] as const,
+  reports: ["reports"] as const,
+  nda: ["nda"] as const,
+  billing: ["billing"] as const,
+  files: ["files"] as const,
+  admin: ["admin"] as const,
+};

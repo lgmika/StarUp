@@ -3,16 +3,135 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 using StartupConnect.Api.Observability;
+using StartupConnect.Api.Middlewares;
 using StartupConnect.Api.Security;
 using StartupConnect.Application.Admin.Dtos;
 using StartupConnect.Application.Files.Dtos;
 using StartupConnect.Application.Reports.Dtos;
 using StartupConnect.Domain.Enums;
+using StartupConnect.Infrastructure.Email;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace StartupConnect.Tests;
 
 public sealed class ProductionReadinessTests
 {
+    [Fact]
+    public void Json_Enums_Should_Reject_Undefined_Integer_Values()
+    {
+        var options = new JsonSerializerOptions();
+        options.Converters.Add(new JsonStringEnumConverter(allowIntegerValues: false));
+
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<ProjectStatus>("999", options));
+        Assert.Equal(ProjectStatus.Published, JsonSerializer.Deserialize<ProjectStatus>("\"Published\"", options));
+    }
+
+    [Fact]
+    public void SecurityConfigurationValidator_Should_Reject_Invalid_Forwarded_Network()
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["Security:KnownNetworks:0"] = "172.29.0.0/not-a-prefix"
+        });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Development")));
+
+        Assert.Contains("KnownNetworks", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("*")]
+    [InlineData("https://app.startupconnect.example/path")]
+    [InlineData("https://app.startupconnect.example?tenant=1")]
+    [InlineData("https://app.startupconnect.example/")]
+    public void SecurityConfigurationValidator_Should_Reject_Invalid_Cors_Origins(string origin)
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["Cors:AllowedOrigins:0"] = origin
+        });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Development")));
+
+        Assert.Contains("Cors:AllowedOrigins", exception.Message);
+    }
+
+    [Fact]
+    public void SecurityConfigurationValidator_Should_Require_Jwt_Issuer_And_Audience()
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["Jwt:Issuer"] = ""
+        });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Development")));
+
+        Assert.Contains("Jwt:Issuer", exception.Message);
+    }
+
+    [Fact]
+    public void SecurityConfigurationValidator_Should_Require_Secure_Host_Prefixed_Cookie()
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["Security:RefreshTokenCookie:Enabled"] = "true",
+            ["Security:RefreshTokenCookie:Name"] = "__Host-startupconnect-refresh",
+            ["Security:RefreshTokenCookie:Secure"] = "false"
+        });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Development")));
+
+        Assert.Contains("__Host-", exception.Message);
+    }
+
+    [Fact]
+    public void SecurityConfigurationValidator_Should_Reject_SameSite_None_In_Production()
+    {
+        var configuration = CreateProductionReadyConfiguration(new Dictionary<string, string?>
+        {
+            ["Security:RefreshTokenCookie:Enabled"] = "true",
+            ["Security:RefreshTokenCookie:Secure"] = "true",
+            ["Security:RefreshTokenCookie:SameSite"] = "None"
+        });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Production")));
+
+        Assert.Contains("CSRF", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("Jwt:AccessTokenMinutes", "0")]
+    [InlineData("Jwt:RefreshTokenDays", "91")]
+    [InlineData("Email:Outbox:LeaseSeconds", "10")]
+    [InlineData("BackgroundJobs:EmailOutboxRetentionDays", "0")]
+    [InlineData("BackgroundJobs:ExecutionRetentionDays", "0")]
+    [InlineData("BackgroundJobs:RefreshTokenRetentionDays", "1")]
+    public void SecurityConfigurationValidator_Should_Reject_Unsafe_Operational_Ranges(string key, string value)
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?> { [key] = value });
+
+        Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Development")));
+    }
+
+    [Theory]
+    [InlineData("Email:Provider", "Unknown")]
+    [InlineData("FileStorage:Provider", "Unknown")]
+    public void SecurityConfigurationValidator_Should_Reject_Unknown_Infrastructure_Providers(string key, string value)
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?> { [key] = value });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Development")));
+
+        Assert.Contains("not supported", exception.Message);
+    }
     [Fact]
     public void AdminSettingDto_Should_Expose_Frontend_Config_Metadata()
     {
@@ -84,12 +203,45 @@ public sealed class ProductionReadinessTests
     }
 
     [Fact]
+    public void AuthCookieHelper_Should_Hide_Refresh_Token_From_Response_When_Cookie_Mode_Is_Enabled()
+    {
+        var context = new DefaultHttpContext();
+        var options = new StartupConnectSecurityOptions
+        {
+            RefreshTokenCookie = new RefreshTokenCookieSettings
+            {
+                Enabled = true,
+                Secure = true,
+                SameSite = "Strict"
+            }
+        };
+        var response = new StartupConnect.Application.Auth.Dtos.AuthResponse(
+            "access-token",
+            DateTimeOffset.UtcNow.AddMinutes(30),
+            "secret-refresh-token",
+            DateTimeOffset.UtcNow.AddDays(14),
+            new StartupConnect.Application.Auth.Dtos.AuthUserDto(
+                Guid.NewGuid(),
+                "user@example.com",
+                "User",
+                true,
+                []));
+
+        var clientResponse = AuthCookieHelper.PrepareClientResponse(context.Response, response, options);
+
+        Assert.Empty(clientResponse.RefreshToken);
+        Assert.Contains("secret-refresh-token", context.Response.Headers.SetCookie.ToString());
+    }
+
+    [Fact]
     public void SecurityConfigurationValidator_Should_Reject_Dev_Secrets_Outside_Development()
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Jwt:SigningKey"] = "DEV_ONLY_StartupConnect_JwtSigningKey_AtLeast32Chars_ReplaceInProduction",
+                ["Jwt:Issuer"] = "StartupConnect",
+                ["Jwt:Audience"] = "StartupConnect.Client",
                 ["AllowedHosts"] = "api.startupconnect.example",
                 ["Cors:AllowedOrigins:0"] = "https://app.startupconnect.example"
             })
@@ -106,11 +258,18 @@ public sealed class ProductionReadinessTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Jwt:SigningKey"] = "prod_signing_key_that_is_long_enough_for_tests",
+                ["Jwt:Issuer"] = "StartupConnect",
+                ["Jwt:Audience"] = "StartupConnect.Client",
+                ["Security:KnownProxies:0"] = "172.29.0.10",
                 ["AllowedHosts"] = "api.startupconnect.example",
                 ["Cors:AllowedOrigins:0"] = "https://app.startupconnect.example",
                 ["Payments:Provider"] = "Stripe",
                 ["Payments:ApiKey"] = "sk_test_valid_for_validator",
                 ["Payments:WebhookSecret"] = "whsec_valid_for_validator",
+                ["Payments:CheckoutBaseUrl"] = "https://app.startupconnect.example/billing/checkout",
+                ["AI:Provider"] = "Ollama",
+                ["AI:Ollama:BaseUrl"] = "http://ollama:11434",
+                ["AI:Ollama:Model"] = "llama3.1",
                 ["Email:Provider"] = "Smtp",
                 ["Email:FromEmail"] = "no-reply@wrong.example",
                 ["Email:AppBaseUrl"] = "https://app.startupconnect.example",
@@ -118,7 +277,8 @@ public sealed class ProductionReadinessTests
                 ["Email:VerifiedSenderDomain"] = "startupconnect.example",
                 ["Email:Smtp:Host"] = "smtp.example.com",
                 ["Email:Smtp:Username"] = "smtp-user",
-                ["Email:Smtp:Password"] = "smtp-password"
+                ["Email:Smtp:Password"] = "smtp-password",
+                ["Email:Outbox:EncryptionKey"] = "production_email_outbox_encryption_key_for_tests"
             })
             .Build();
 
@@ -161,6 +321,22 @@ public sealed class ProductionReadinessTests
     }
 
     [Fact]
+    public void SecurityConfigurationValidator_Should_Reject_Cv_Limit_Above_Request_Limit()
+    {
+        var configuration = CreateProductionReadyConfiguration(
+            new Dictionary<string, string?>
+            {
+                ["Security:MaxRequestBodySizeBytes"] = "1048576",
+                ["FileStorage:MaxCvBytes"] = "2097152"
+            });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Production")));
+
+        Assert.Contains("MaxCvBytes", exception.Message);
+    }
+
+    [Fact]
     public void SecurityConfigurationValidator_Should_Require_Rate_Limiting_In_Production()
     {
         var configuration = CreateProductionReadyConfiguration(
@@ -176,6 +352,112 @@ public sealed class ProductionReadinessTests
     }
 
     [Fact]
+    public void SecurityConfigurationValidator_Should_Require_Security_Headers_In_Production()
+    {
+        var configuration = CreateProductionReadyConfiguration(
+            new Dictionary<string, string?>
+            {
+                ["Security:EnableSecurityHeaders"] = "false"
+            });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Production")));
+
+        Assert.Contains("EnableSecurityHeaders", exception.Message);
+    }
+
+    [Fact]
+    public void SecurityConfigurationValidator_Should_Reject_Insecure_Refresh_Cookie_Outside_Development()
+    {
+        var configuration = CreateProductionReadyConfiguration(
+            new Dictionary<string, string?>
+            {
+                ["Security:RefreshTokenCookie:Enabled"] = "true",
+                ["Security:RefreshTokenCookie:Secure"] = "false",
+                ["Security:RefreshTokenCookie:SameSite"] = "Lax"
+            });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Staging")));
+
+        Assert.Contains("RefreshTokenCookie:Secure", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("104857601")]
+    public void SecurityConfigurationValidator_Should_Reject_Unsafe_Request_Body_Limits(string value)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Jwt:SigningKey"] = "DEV_ONLY_StartupConnect_JwtSigningKey_AtLeast32Chars_ReplaceInProduction",
+                ["Jwt:Issuer"] = "StartupConnect",
+                ["Jwt:Audience"] = "StartupConnect.Client",
+                ["Security:MaxRequestBodySizeBytes"] = value
+            })
+            .Build();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Development")));
+
+        Assert.Contains("MaxRequestBodySizeBytes", exception.Message);
+    }
+
+    [Fact]
+    public void SecurityConfigurationValidator_Should_Reject_Mock_AI_In_Production()
+    {
+        var configuration = CreateProductionReadyConfiguration(
+            new Dictionary<string, string?>
+            {
+                ["AI:Provider"] = "Mock"
+            });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Production")));
+
+        Assert.Contains("AI:Provider", exception.Message);
+    }
+
+    [Fact]
+    public void SecurityConfigurationValidator_Should_Reject_Unknown_AI_Provider()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Jwt:SigningKey"] = "DEV_ONLY_StartupConnect_JwtSigningKey_AtLeast32Chars_ReplaceInProduction",
+                ["Jwt:Issuer"] = "StartupConnect",
+                ["Jwt:Audience"] = "StartupConnect.Client",
+                ["AI:Provider"] = "Unknown"
+            })
+            .Build();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Development")));
+
+        Assert.Contains("not supported", exception.Message);
+    }
+
+    [Fact]
+    public void SecurityConfigurationValidator_Should_Reject_Unknown_Payment_Provider()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Jwt:SigningKey"] = "DEV_ONLY_StartupConnect_JwtSigningKey_AtLeast32Chars_ReplaceInProduction",
+                ["Jwt:Issuer"] = "StartupConnect",
+                ["Jwt:Audience"] = "StartupConnect.Client",
+                ["Payments:Provider"] = "Unknown"
+            })
+            .Build();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Development")));
+
+        Assert.Contains("not supported", exception.Message);
+    }
+
+    [Fact]
     public void OperationsOptions_Should_Default_To_Production_Friendly_Values()
     {
         var observability = new ObservabilityOptions();
@@ -185,6 +467,50 @@ public sealed class ProductionReadinessTests
         Assert.Equal("X-Correlation-Id", observability.CorrelationHeaderName);
         Assert.True(rateLimits.Enabled);
         Assert.True(rateLimits.AuthPermitLimit < rateLimits.PermitLimit);
+        Assert.True(new EmailOutboxOptions().Enabled);
+    }
+
+    [Fact]
+    public void SecurityConfigurationValidator_Should_Require_Email_Outbox_In_Production()
+    {
+        var configuration = CreateProductionReadyConfiguration(
+            new Dictionary<string, string?>
+            {
+                ["Email:Outbox:Enabled"] = "false"
+            });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Production")));
+
+        Assert.Contains("Email:Outbox:Enabled", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("request-123", "request-123")]
+    [InlineData("request_123.trace", "request_123.trace")]
+    [InlineData("bad\r\nheader", "server-trace")]
+    public void RequestLoggingMiddleware_Should_Normalize_Client_Correlation_Id(string value, string expected)
+    {
+        Assert.Equal(expected, RequestLoggingMiddleware.NormalizeCorrelationId(value, "server-trace"));
+    }
+
+    [Fact]
+    public void SecurityConfigurationValidator_Should_Reject_Invalid_Correlation_Header_Name()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Jwt:SigningKey"] = "DEV_ONLY_StartupConnect_JwtSigningKey_AtLeast32Chars_ReplaceInProduction",
+                ["Jwt:Issuer"] = "StartupConnect",
+                ["Jwt:Audience"] = "StartupConnect.Client",
+                ["Observability:CorrelationHeaderName"] = "Bad Header"
+            })
+            .Build();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SecurityConfigurationValidator.Validate(configuration, new TestHostEnvironment("Development")));
+
+        Assert.Contains("CorrelationHeaderName", exception.Message);
     }
 
     private sealed class TestHostEnvironment(string environmentName) : IHostEnvironment
@@ -198,16 +524,43 @@ public sealed class ProductionReadinessTests
         public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 
+    private static IConfiguration BuildConfiguration(IReadOnlyDictionary<string, string?> overrides)
+    {
+        var values = new Dictionary<string, string?>
+        {
+            ["Jwt:SigningKey"] = "DEV_ONLY_StartupConnect_JwtSigningKey_AtLeast32Chars_ReplaceInProduction",
+            ["Jwt:Issuer"] = "StartupConnect",
+            ["Jwt:Audience"] = "StartupConnect.Client",
+            ["Security:UseForwardedHeaders"] = "false"
+        };
+
+        foreach (var item in overrides)
+        {
+            values[item.Key] = item.Value;
+        }
+
+        return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+    }
+
     private static IConfiguration CreateProductionReadyConfiguration(IReadOnlyDictionary<string, string?> overrides)
     {
         var values = new Dictionary<string, string?>
         {
             ["Jwt:SigningKey"] = "prod_signing_key_that_is_long_enough_for_tests",
+            ["Jwt:Issuer"] = "StartupConnect",
+            ["Jwt:Audience"] = "StartupConnect.Client",
+            ["Security:KnownProxies:0"] = "172.29.0.10",
             ["AllowedHosts"] = "api.startupconnect.example",
             ["Cors:AllowedOrigins:0"] = "https://app.startupconnect.example",
             ["Payments:Provider"] = "Stripe",
             ["Payments:ApiKey"] = "sk_test_valid_for_validator",
             ["Payments:WebhookSecret"] = "whsec_valid_for_validator",
+            ["Payments:CheckoutBaseUrl"] = "https://app.startupconnect.example/billing/checkout",
+            ["AI:Provider"] = "Ollama",
+            ["AI:DailyQuota"] = "20",
+            ["AI:Ollama:BaseUrl"] = "http://ollama:11434",
+            ["AI:Ollama:Model"] = "llama3.1",
+            ["AI:Ollama:TimeoutSeconds"] = "120",
             ["Email:Provider"] = "Smtp",
             ["Email:FromEmail"] = "no-reply@startupconnect.example",
             ["Email:AppBaseUrl"] = "https://app.startupconnect.example",
@@ -216,6 +569,7 @@ public sealed class ProductionReadinessTests
             ["Email:Smtp:Host"] = "smtp.example.com",
             ["Email:Smtp:Username"] = "smtp-user",
             ["Email:Smtp:Password"] = "smtp-password",
+            ["Email:Outbox:EncryptionKey"] = "production_email_outbox_encryption_key_for_tests",
             ["FileStorage:Provider"] = "S3",
             ["FileStorage:S3:BucketName"] = "startupconnect-files",
             ["FileStorage:S3:Region"] = "us-east-1"

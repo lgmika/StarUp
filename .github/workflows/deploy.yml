@@ -1,0 +1,85 @@
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: GHCR image tag produced by the release workflow
+        required: true
+        default: latest
+      api_base_url:
+        description: Public API base URL
+        required: true
+        default: https://api.example.com/api/v1
+      frontend_url:
+        description: Public frontend URL
+        required: true
+        default: https://app.example.com
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate deployment inputs
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          API_BASE_URL: ${{ inputs.api_base_url }}
+          FRONTEND_URL: ${{ inputs.frontend_url }}
+          DEPLOY_PATH: ${{ secrets.PRODUCTION_DEPLOY_PATH }}
+          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+        run: |
+          [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Invalid image tag." >&2; exit 1; }
+          [[ "$API_BASE_URL" =~ ^https://[A-Za-z0-9._:/-]+$ ]] || { echo "Invalid API URL." >&2; exit 1; }
+          [[ "$FRONTEND_URL" =~ ^https://[A-Za-z0-9._:/-]+$ ]] || { echo "Invalid frontend URL." >&2; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid production deploy path." >&2; exit 1; }
+          [[ "$SSH_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "Invalid SSH host." >&2; exit 1; }
+          [[ "$SSH_USER" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Invalid SSH user." >&2; exit 1; }
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Upload deployment files
+        env:
+          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.PRODUCTION_DEPLOY_PATH }}
+        run: |
+          ssh -o BatchMode=yes "$SSH_USER@$SSH_HOST" "mkdir -p '$DEPLOY_PATH/deploy' '$DEPLOY_PATH/tools'"
+          scp -o BatchMode=yes docker-compose.production.yml "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/docker-compose.production.yml"
+          scp -o BatchMode=yes deploy/Caddyfile "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/deploy/Caddyfile"
+          scp -o BatchMode=yes tools/deploy-production.sh tools/smoke-test.sh "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/tools/"
+
+      - name: Deploy released images
+        env:
+          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.PRODUCTION_DEPLOY_PATH }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          API_BASE_URL: ${{ inputs.api_base_url }}
+          FRONTEND_URL: ${{ inputs.frontend_url }}
+          IMAGE_OWNER: ${{ github.repository_owner }}
+        run: |
+          image_owner="${IMAGE_OWNER,,}"
+          api_image="ghcr.io/${image_owner}/startupconnect-api:${IMAGE_TAG}"
+          frontend_image="ghcr.io/${image_owner}/startupconnect-frontend:${IMAGE_TAG}"
+          ssh -o BatchMode=yes "$SSH_USER@$SSH_HOST" \
+            "cd '$DEPLOY_PATH' && API_IMAGE='$api_image' FRONTEND_IMAGE='$frontend_image' bash ./tools/deploy-production.sh .env.production docker-compose.production.yml '$API_BASE_URL' '$FRONTEND_URL'"

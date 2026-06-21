@@ -4,12 +4,15 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { AlertCircle, ArrowLeft, Briefcase, LockKeyhole, Target, type LucideIcon } from "lucide-react";
+import { ProjectNdaPanel } from "@/components/nda/project-nda-panel";
 import { ProjectStageBadge, ProjectStatusBadge, ProjectVisibilityBadge } from "@/components/projects/project-badges";
+import { ReportDialog } from "@/components/reports/report-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Panel, PanelBody, PanelHeader, PanelTitle } from "@/components/ui/panel";
 import { getApiErrorMessage } from "@/lib/api";
 import { projectService } from "@/services";
 import type { ProjectDetailDto } from "@/types/project";
+import { PublicSessionActions } from "@/components/auth/public-session-actions";
 
 type LoadState = "loading" | "ready" | "forbidden" | "not-found" | "error";
 
@@ -54,15 +57,13 @@ export default function ProjectDetailPage() {
             <ArrowLeft className="h-4 w-4" />
             Back to projects
           </Link>
-          <Link className="text-sm font-medium text-primary hover:underline" href="/auth/login">
-            Sign in
-          </Link>
+          <PublicSessionActions compact />
         </div>
       </header>
 
       <section className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         {state === "loading" ? <ProjectDetailSkeleton /> : null}
-        {state === "forbidden" ? <ProtectedProjectState message={error} /> : null}
+        {state === "forbidden" ? <ProtectedProjectState projectId={params.id} message={error} /> : null}
         {state === "not-found" ? <InfoState title="Project not found" message={error ?? "This project does not exist or was removed."} /> : null}
         {state === "error" ? <InfoState title="Could not load project" message={error ?? "Please try again."} tone="error" /> : null}
         {state === "ready" && project ? <ProjectDetail project={project} /> : null}
@@ -85,14 +86,17 @@ function ProjectDetail({ project }: { project: ProjectDetailDto }) {
           </div>
           <h1 className="mt-4 text-2xl font-semibold">{project.title}</h1>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-muted-foreground">{project.summary}</p>
+          <div className="mt-5 flex flex-wrap gap-2">
           {project.isRecruiting ? (
             <Link
-              className="mt-5 inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+              className="inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
               href={`/projects/${project.id}/apply`}
             >
               Apply to project
             </Link>
           ) : null}
+          <ReportDialog targetType="Project" targetId={project.id} />
+          </div>
         </div>
 
         <DetailSection icon={Target} title="Problem" text={project.problem} />
@@ -107,7 +111,7 @@ function ProjectDetail({ project }: { project: ProjectDetailDto }) {
       </section>
 
       <aside className="space-y-4">
-        {project.requiresNda ? <NdaPrompt /> : null}
+        {project.requiresNda ? <ProjectNdaPanel projectId={project.id} /> : null}
 
         <Panel>
           <PanelHeader>
@@ -202,23 +206,7 @@ function OptionalDetail({ title, text, isLink = false }: { title: string; text?:
   );
 }
 
-function NdaPrompt() {
-  return (
-    <Panel className="border-amber-200 bg-amber-50 text-amber-950">
-      <PanelBody className="space-y-3">
-        <div className="flex items-center gap-2 font-semibold">
-          <LockKeyhole className="h-4 w-4" />
-          NDA required
-        </div>
-        <p className="text-sm leading-6">
-          Backend returned this project detail and marked it as NDA-required. Future NDA phase will connect the current NDA template and acceptance flow.
-        </p>
-      </PanelBody>
-    </Panel>
-  );
-}
-
-function ProtectedProjectState({ message }: { message: string | null }) {
+function ProtectedProjectState({ projectId, message }: { projectId: string; message: string | null }) {
   return (
     <Panel>
       <PanelBody className="mx-auto flex max-w-xl flex-col items-center py-14 text-center">
@@ -229,13 +217,10 @@ function ProtectedProjectState({ message }: { message: string | null }) {
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           {message ?? "The backend did not return project details for this account. It may require membership, investor access, or an accepted NDA."}
         </p>
-        <div className="mt-6 flex flex-col gap-2 sm:flex-row">
-          <Link
-            className="inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-            href="/auth/login"
-          >
-            Sign in with another account
-          </Link>
+        <div className="mt-6 w-full text-left">
+          <ProjectNdaPanel projectId={projectId} onAccepted={() => window.location.reload()} />
+        </div>
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row">
           <Link
             className="inline-flex h-10 items-center justify-center rounded-md border border-border bg-background px-4 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
             href="/projects"

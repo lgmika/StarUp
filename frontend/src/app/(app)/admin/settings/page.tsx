@@ -1,94 +1,70 @@
 "use client";
 
-import { Activity, Bell, Brain, Database, Lock, Settings } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Save, Settings } from "lucide-react";
+import { toast } from "sonner";
 import { RoleGuard } from "@/components/auth/role-guard";
+import { LoadingState } from "@/components/common/loading-state";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Panel, PanelBody, PanelHeader, PanelTitle } from "@/components/ui/panel";
 import { PageHeader } from "@/components/workspace/page-header";
+import { getApiErrorMessage } from "@/lib/api";
 import { SystemRoles } from "@/lib/constants";
-
-const settings = [
-  {
-    id: "auth",
-    group: "Security",
-    name: "Authentication and role guards",
-    value: "Configured in frontend and enforced by backend authorization policies.",
-    status: "Active",
-    icon: Lock,
-  },
-  {
-    id: "notifications",
-    group: "Engagement",
-    name: "Notifications",
-    value: "Connected to /notifications, unread count, read all, mark read, and archive endpoints.",
-    status: "Active",
-    icon: Bell,
-  },
-  {
-    id: "ai",
-    group: "AI",
-    name: "Project AI helpers",
-    value: "Create/edit project screens call AI suggestion and review endpoints where available.",
-    status: "Active",
-    icon: Brain,
-  },
-  {
-    id: "background-jobs",
-    group: "Operations",
-    name: "Background jobs",
-    value: "Admin can inspect executions and trigger maintenance through backend admin endpoints.",
-    status: "Active",
-    icon: Activity,
-  },
-  {
-    id: "system-settings",
-    group: "Configuration",
-    name: "Editable system settings",
-    value: "No backend settings endpoint is exposed yet, so this screen remains read-only.",
-    status: "Pending endpoint",
-    icon: Database,
-  },
-];
+import { queryKeys } from "@/lib/query-keys";
+import { adminService } from "@/services";
 
 export default function AdminSettingsPage() {
+  return <RoleGuard allowedRoles={[SystemRoles.Admin]}><AdminSettings /></RoleGuard>;
+}
+
+function AdminSettings() {
+  const queryClient = useQueryClient();
+  const [values, setValues] = useState<Record<string, string>>({});
+  const settingsQuery = useQuery({ queryKey: [...queryKeys.admin, "settings"], queryFn: adminService.listSettings });
+  const updateMutation = useMutation({
+    mutationFn: ({ key, value }: { key: string; value: string }) => adminService.updateSetting(key, value, "Updated from admin console"),
+    onSuccess: () => {
+      toast.success("Setting updated.");
+      void queryClient.invalidateQueries({ queryKey: [...queryKeys.admin, "settings"] });
+    },
+    onError: (error) => toast.error(getApiErrorMessage(error)),
+  });
+
+  useEffect(() => {
+    if (settingsQuery.data) setValues(Object.fromEntries(settingsQuery.data.map((setting) => [setting.key, setting.value])));
+  }, [settingsQuery.data]);
+
+  if (settingsQuery.isLoading) return <LoadingState label="Loading admin settings" />;
+
   return (
-    <RoleGuard allowedRoles={[SystemRoles.Admin]}>
-      <div className="space-y-5">
-        <PageHeader
-          title="Admin Settings"
-          description="Read-only operational overview for configured frontend modules and backend-backed admin capabilities."
-        />
-
-        <div className="grid gap-4 lg:grid-cols-2">
-          {settings.map((setting) => {
-            const Icon = setting.icon;
-            return (
-              <Panel key={setting.id}>
-                <PanelHeader className="flex flex-row items-start justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <Icon className="h-4 w-4 text-muted-foreground" />
-                    <PanelTitle>{setting.name}</PanelTitle>
-                  </div>
-                  <Badge tone={setting.status === "Active" ? "success" : "warning"}>{setting.status}</Badge>
-                </PanelHeader>
-                <PanelBody>
-                  <p className="text-xs font-medium uppercase text-muted-foreground">{setting.group}</p>
-                  <p className="mt-3 text-sm text-muted-foreground">{setting.value}</p>
-                </PanelBody>
-              </Panel>
-            );
-          })}
-        </div>
-
-        <Panel>
-          <PanelBody className="flex items-start gap-3">
-            <Settings className="mt-0.5 h-4 w-4 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">
-              Editable quota, realtime, and platform policy controls should be added here once the backend exposes a dedicated settings API.
-            </p>
-          </PanelBody>
-        </Panel>
+    <div className="space-y-5">
+      <PageHeader title="Admin Settings" description="Manage backend system configuration with audit reasons and readonly enforcement." />
+      {settingsQuery.error ? <p className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{getApiErrorMessage(settingsQuery.error)}</p> : null}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {settingsQuery.data?.map((setting) => (
+          <Panel key={setting.key}>
+            <PanelHeader className="flex flex-row items-start justify-between gap-3">
+              <div className="flex items-center gap-2"><Settings className="h-4 w-4 text-muted-foreground" /><PanelTitle>{setting.key}</PanelTitle></div>
+              <Badge tone={setting.isReadonly ? "muted" : "success"}>{setting.isReadonly ? "Readonly" : setting.type}</Badge>
+            </PanelHeader>
+            <PanelBody>
+              <p className="text-xs font-medium uppercase text-muted-foreground">{setting.group}</p>
+              <div className="mt-3 flex gap-2">
+                <Input value={values[setting.key] ?? setting.value} readOnly={setting.isReadonly} onChange={(event) => setValues((current) => ({ ...current, [setting.key]: event.target.value }))} />
+                {!setting.isReadonly ? (
+                  <Button size="icon" aria-label={`Save ${setting.key}`} disabled={updateMutation.isPending || values[setting.key] === setting.value} onClick={() => updateMutation.mutate({ key: setting.key, value: values[setting.key] ?? setting.value })}>
+                    <Save className="h-4 w-4" />
+                  </Button>
+                ) : null}
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">Updated {setting.updatedAt ? new Date(setting.updatedAt).toLocaleString() : "from deployment defaults"}</p>
+            </PanelBody>
+          </Panel>
+        ))}
       </div>
-    </RoleGuard>
+    </div>
   );
 }

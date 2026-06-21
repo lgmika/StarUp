@@ -3,17 +3,37 @@ import type { ApiResponse } from "@/types/api";
 import type {
   AdminAuditLogListResponse,
   AdminDashboardDto,
+  AdminProjectDto,
+  AdminProjectListResponse,
   AdminRoleDto,
   AdminRoleRequest,
   AdminUserDto,
   AdminUserListResponse,
   AdminUserStatusRequest,
+  AdminSettingDto,
+  AdminSubscriptionPlanDto,
+  AdminSubscriptionPlanRequest,
+  AdminUsageQuotaDto,
+  AdminUsageQuotaRequest,
+  AdminEmailOutboxDto,
+  AdminEmailOutboxListResponse,
 } from "@/types/admin";
+import type { ProjectStage, ProjectStatus, ProjectVisibility } from "@/types/enums";
 
 interface AdminUserQuery {
   search?: string;
   status?: string;
   roleCode?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface AdminProjectQuery {
+  search?: string;
+  status?: ProjectStatus;
+  stage?: ProjectStage;
+  visibility?: ProjectVisibility;
+  ownerEmail?: string;
   page?: number;
   pageSize?: number;
 }
@@ -73,6 +93,70 @@ export const adminService = {
     const { data } = await api.get<ApiResponse<AdminAuditLogListResponse>>("/admin/audit-logs", {
       params: { page, pageSize },
     });
+    return data.data;
+  },
+
+  async listSettings() {
+    const { data } = await api.get<ApiResponse<AdminSettingDto[]>>("/admin/settings");
+    return data.data;
+  },
+
+  async updateSetting(key: string, value: string, reason?: string) {
+    const { data } = await api.put<ApiResponse<AdminSettingDto>>(`/admin/settings/${encodeURIComponent(key)}`, { value, reason });
+    return data.data;
+  },
+
+  async listProjects(params: AdminProjectQuery = {}) {
+    const { data } = await api.get<ApiResponse<AdminProjectListResponse>>("/admin/projects", { params });
+    return data.data;
+  },
+
+  async projectAction(projectId: string, action: "hide" | "restore" | "archive" | "close", reason: string) {
+    const { data } = await api.post<ApiResponse<AdminProjectDto>>(`/admin/projects/${projectId}/${action}`, { reason });
+    return data.data;
+  },
+
+  async forceProjectStatus(projectId: string, status: ProjectStatus, reason: string) {
+    const { data } = await api.post<ApiResponse<AdminProjectDto>>(`/admin/projects/${projectId}/status`, { status, reason });
+    return data.data;
+  },
+
+  async listSubscriptionPlans() {
+    const { data } = await api.get<ApiResponse<AdminSubscriptionPlanDto[]>>("/admin/subscription-plans");
+    return data.data;
+  },
+
+  async createSubscriptionPlan(request: AdminSubscriptionPlanRequest) {
+    const { data } = await api.post<ApiResponse<AdminSubscriptionPlanDto>>("/admin/subscription-plans", request);
+    return data.data;
+  },
+
+  async updateSubscriptionPlan(planId: string, request: AdminSubscriptionPlanRequest) {
+    const { data } = await api.put<ApiResponse<AdminSubscriptionPlanDto>>(`/admin/subscription-plans/${planId}`, request);
+    return data.data;
+  },
+
+  async createUsageQuota(planId: string, request: AdminUsageQuotaRequest) {
+    const { data } = await api.post<ApiResponse<AdminUsageQuotaDto>>(`/admin/subscription-plans/${planId}/quotas`, request);
+    return data.data;
+  },
+
+  async updateUsageQuota(planId: string, quotaId: string, request: AdminUsageQuotaRequest) {
+    const { data } = await api.put<ApiResponse<AdminUsageQuotaDto>>(`/admin/subscription-plans/${planId}/quotas/${quotaId}`, request);
+    return data.data;
+  },
+
+  async deleteUsageQuota(planId: string, quotaId: string, reason?: string) {
+    await api.delete<ApiResponse<null>>(`/admin/subscription-plans/${planId}/quotas/${quotaId}`, { params: { reason } });
+  },
+
+  async listEmailOutbox(params: { status?: string; recipient?: string; page?: number; pageSize?: number } = {}) {
+    const { data } = await api.get<ApiResponse<AdminEmailOutboxListResponse>>("/admin/email-outbox", { params });
+    return data.data;
+  },
+
+  async retryEmail(messageId: string, reason?: string) {
+    const { data } = await api.post<ApiResponse<AdminEmailOutboxDto>>(`/admin/email-outbox/${messageId}/retry`, { reason });
     return data.data;
   },
 };

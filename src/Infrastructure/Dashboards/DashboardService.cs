@@ -121,7 +121,11 @@ public sealed class DashboardService(
                 range.From,
                 range.To,
                 range.TimezoneOffsetMinutes,
-                ProjectViews: 0,
+                ProjectViews: await dbContext.ProjectViews.CountAsync(view =>
+                    view.ProjectId == projectId &&
+                    view.CreatedAt >= range.From &&
+                    view.CreatedAt <= range.To,
+                    cancellationToken),
                 SavedCount: await dbContext.SavedProjects.CountAsync(saved => saved.ProjectId == projectId, cancellationToken),
                 Applications: applications,
                 ApplicationConversionRate: DashboardMetrics.ConversionRate(acceptedApplications, applications),

@@ -4,10 +4,12 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using StartupConnect.Application.Moderation.Dtos;
 using StartupConnect.Application.Moderation.Interfaces;
+using StartupConnect.Application.Admin.Interfaces;
 using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
 using StartupConnect.Infrastructure.Persistence;
+using StartupConnect.Infrastructure.Notifications;
 using StartupConnect.Shared.Exceptions;
 using StartupConnect.Shared.Responses;
 
@@ -15,7 +17,8 @@ namespace StartupConnect.Infrastructure.Moderation;
 
 public sealed class ModeratorService(
     AppDbContext dbContext,
-    IRealtimeNotifier realtimeNotifier) : IModeratorService
+    IRealtimeNotifier realtimeNotifier,
+    ISystemSettingReader systemSettingReader) : IModeratorService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -34,24 +37,34 @@ public sealed class ModeratorService(
         var projects = await dbContext.Projects
             .Where(project => project.Status == ProjectStatus.PendingReview && !project.IsDeleted)
             .OrderBy(project => project.SubmittedAt ?? project.CreatedAt)
-            .ToArrayAsync(cancellationToken);
-
-        var result = new List<ModeratorProjectQueueItemDto>();
-        foreach (var project in projects)
-        {
-            var latestReview = await GetLatestAIReviewAsync(project.Id, cancellationToken);
-            result.Add(new ModeratorProjectQueueItemDto(
+            .Take(200)
+            .Select(project => new
+            {
                 project.Id,
                 project.Title,
                 project.Summary,
                 project.Status,
                 project.Stage,
-                latestReview?.QualityScore,
-                latestReview is null ? [] : DeserializeStrings(latestReview.RiskFlagsJson),
-                project.SubmittedAt));
-        }
+                project.SubmittedAt,
+                LatestReview = dbContext.AIReviews
+                    .Where(review => review.ProjectId == project.Id)
+                    .OrderByDescending(review => review.CreatedAt)
+                    .Select(review => new { review.QualityScore, review.RiskFlagsJson })
+                    .FirstOrDefault()
+            })
+            .ToArrayAsync(cancellationToken);
 
-        return result;
+        return projects
+            .Select(project => new ModeratorProjectQueueItemDto(
+                project.Id,
+                project.Title,
+                project.Summary,
+                project.Status,
+                project.Stage,
+                project.LatestReview?.QualityScore,
+                project.LatestReview is null ? [] : DeserializeStrings(project.LatestReview.RiskFlagsJson),
+                project.SubmittedAt))
+            .ToArray();
     }
 
     public async Task<ModeratorProjectDetailDto> GetProjectAsync(Guid projectId, CancellationToken cancellationToken)
@@ -65,6 +78,7 @@ public sealed class ModeratorService(
         var history = await dbContext.ProjectModerationReviews
             .Where(review => review.ProjectId == projectId)
             .OrderByDescending(review => review.CreatedAt)
+            .Take(500)
             .Select(review => new ModerationReviewDto(
                 review.Id,
                 review.Decision,
@@ -125,6 +139,12 @@ public sealed class ModeratorService(
         var moderatorUserId = GetUserId(principal);
         ValidateReason(request.Reason);
 
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        var lockResource = $"project-moderation:{projectId:N}";
+        await dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT pg_advisory_xact_lock(hashtextextended({lockResource}, 0))",
+            cancellationToken);
+
         var project = await dbContext.Projects.FirstOrDefaultAsync(item => item.Id == projectId && !item.IsDeleted, cancellationToken)
             ?? throw new ApiException("Project not found", HttpStatusCode.NotFound);
 
@@ -144,15 +164,21 @@ public sealed class ModeratorService(
             AIRiskFlagsSnapshotJson = latestReview?.RiskFlagsJson
         });
 
-        dbContext.Notifications.Add(new Notification
+        Notification? notification = null;
+        if (await systemSettingReader.GetBooleanAsync("Notifications.Enabled", true, cancellationToken))
         {
-            UserId = project.OwnerUserId,
-            Type = NotificationType.ProjectModeration,
-            Title = notificationTitle,
-            Message = request.Reason.Trim(),
-            ResourceId = project.Id,
-            ResourceType = "Project"
-        });
+            notification = new Notification
+            {
+                UserId = project.OwnerUserId,
+                Type = NotificationType.ProjectModeration,
+                Title = notificationTitle,
+                Message = request.Reason.Trim(),
+                ResourceId = project.Id,
+                ResourceType = "Project",
+                ActionUrl = $"/projects/{project.Id}"
+            };
+            dbContext.Notifications.Add(notification);
+        }
 
         AddAudit(moderatorUserId, $"Moderator.Project.{decision}", "Project", project.Id, request.Reason);
         if (nextStatus == ProjectStatus.Published)
@@ -174,6 +200,11 @@ public sealed class ModeratorService(
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        if (notification is not null)
+        {
+            await realtimeNotifier.NotificationCreatedAsync(project.OwnerUserId, notification.ToDto(), cancellationToken);
+        }
         await realtimeNotifier.ProjectStatusChangedAsync(project.Id, new
         {
             project.Id,

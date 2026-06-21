@@ -5,6 +5,8 @@ import type {
   CreateNdaTemplateVersionRequest,
   NdaTemplateDto,
   NdaTemplateVersionDto,
+  CurrentProjectNdaDto,
+  NdaAgreementDto,
 } from "@/types/nda";
 
 export const ndaService = {
@@ -24,7 +26,22 @@ export const ndaService = {
   },
 
   async listMyAgreements() {
-    const { data } = await api.get<ApiResponse<import("@/types/nda").NdaAgreementDto[]>>("/users/me/nda-agreements");
+    const { data } = await api.get<ApiResponse<NdaAgreementDto[]>>("/users/me/nda-agreements");
+    return data.data;
+  },
+
+  async getCurrentProjectNda(projectId: string) {
+    const { data } = await api.get<ApiResponse<CurrentProjectNdaDto>>(`/projects/${projectId}/nda/current`);
+    return data.data;
+  },
+
+  async acceptProjectNda(projectId: string) {
+    const { data } = await api.post<ApiResponse<NdaAgreementDto>>(`/projects/${projectId}/nda/accept`);
+    return data.data;
+  },
+
+  async listProjectAgreements(projectId: string) {
+    const { data } = await api.get<ApiResponse<NdaAgreementDto[]>>(`/projects/${projectId}/nda/agreements`);
     return data.data;
   },
 };

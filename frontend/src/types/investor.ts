@@ -50,3 +50,14 @@ export interface InvestorProjectDiscoveryDto {
   project: ProjectSummaryDto;
   investorSummary?: string;
 }
+
+export interface InvestorDashboardDto {
+  from: string;
+  to: string;
+  timezoneOffsetMinutes: number;
+  interestedProjects: number;
+  interestStatus: Array<{ status: string; count: number }>;
+  ndaPending: number;
+  acceptedAccess: number;
+  savedProjects: number;
+}

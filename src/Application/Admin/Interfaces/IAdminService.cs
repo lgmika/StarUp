@@ -54,4 +54,8 @@ public interface IAdminService
     Task<AdminUsageQuotaDto> UpdateUsageQuotaAsync(ClaimsPrincipal principal, Guid planId, Guid quotaId, AdminUsageQuotaRequest request, CancellationToken cancellationToken);
 
     Task DeleteUsageQuotaAsync(ClaimsPrincipal principal, Guid planId, Guid quotaId, string? reason, CancellationToken cancellationToken);
+
+    Task<AdminEmailOutboxListResponse> GetEmailOutboxAsync(AdminEmailOutboxQuery query, CancellationToken cancellationToken);
+
+    Task<AdminEmailOutboxDto> RetryEmailAsync(ClaimsPrincipal principal, Guid messageId, AdminRetryEmailRequest request, CancellationToken cancellationToken);
 }

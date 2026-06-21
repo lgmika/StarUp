@@ -1,0 +1,152 @@
+name: startupconnect-production
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+
+  migrate:
+    image: ${API_IMAGE:-startupconnect-api:latest}
+    entrypoint: ["/app/efbundle"]
+    command: ["--connection", "Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}"]
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:?JWT_SIGNING_KEY is required}
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks: [backend]
+
+  api:
+    image: ${API_IMAGE:-startupconnect-api:latest}
+    restart: unless-stopped
+    environment: &api-environment
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      AllowedHosts: ${ALLOWED_HOSTS:?ALLOWED_HOSTS is required}
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:?JWT_SIGNING_KEY is required}
+      Cors__AllowedOrigins__0: ${APP_ORIGIN:?APP_ORIGIN is required}
+      Security__UseForwardedHeaders: "true"
+      Security__KnownProxies__0: ${CADDY_PROXY_IP:-172.29.0.10}
+      Security__RequireHttpsRedirection: "true"
+      Security__EnableHsts: "true"
+      Security__EnableSecurityHeaders: "true"
+      Security__RefreshTokenCookie__Enabled: "true"
+      Security__RefreshTokenCookie__Secure: "true"
+      Security__RefreshTokenCookie__SameSite: Strict
+      Email__Provider: Smtp
+      Email__FromEmail: ${EMAIL_FROM:?EMAIL_FROM is required}
+      Email__AppBaseUrl: ${APP_ORIGIN}
+      Email__RequireVerifiedSenderDomain: "true"
+      Email__VerifiedSenderDomain: ${EMAIL_VERIFIED_SENDER_DOMAIN:?EMAIL_VERIFIED_SENDER_DOMAIN is required}
+      Email__Smtp__Host: ${EMAIL_SMTP_HOST:?EMAIL_SMTP_HOST is required}
+      Email__Smtp__Port: ${EMAIL_SMTP_PORT:-587}
+      Email__Smtp__EnableSsl: "true"
+      Email__Smtp__Username: ${EMAIL_SMTP_USERNAME:?EMAIL_SMTP_USERNAME is required}
+      Email__Smtp__Password: ${EMAIL_SMTP_PASSWORD:?EMAIL_SMTP_PASSWORD is required}
+      Email__Outbox__Enabled: "true"
+      Email__Outbox__PollSeconds: ${EMAIL_OUTBOX_POLL_SECONDS:-5}
+      Email__Outbox__BatchSize: ${EMAIL_OUTBOX_BATCH_SIZE:-50}
+      Email__Outbox__MaxAttempts: ${EMAIL_OUTBOX_MAX_ATTEMPTS:-10}
+      Email__Outbox__LeaseSeconds: ${EMAIL_OUTBOX_LEASE_SECONDS:-600}
+      Email__Outbox__EncryptionKey: ${EMAIL_OUTBOX_ENCRYPTION_KEY:?EMAIL_OUTBOX_ENCRYPTION_KEY is required}
+      BackgroundJobs__EmailOutboxRetentionDays: ${EMAIL_OUTBOX_RETENTION_DAYS:-30}
+      BackgroundJobs__FailedEmailOutboxRetentionDays: ${FAILED_EMAIL_OUTBOX_RETENTION_DAYS:-90}
+      BackgroundJobs__ExecutionRetentionDays: ${BACKGROUND_JOB_EXECUTION_RETENTION_DAYS:-90}
+      BackgroundJobs__RefreshTokenRetentionDays: ${REFRESH_TOKEN_RETENTION_DAYS:-30}
+      AI__Provider: Ollama
+      AI__DailyQuota: ${AI_DAILY_QUOTA:-20}
+      AI__Ollama__BaseUrl: ${AI_OLLAMA_BASE_URL:?AI_OLLAMA_BASE_URL is required}
+      AI__Ollama__Model: ${AI_OLLAMA_MODEL:-llama3.1}
+      AI__Ollama__TimeoutSeconds: ${AI_OLLAMA_TIMEOUT_SECONDS:-120}
+      FileStorage__Provider: S3
+      FileStorage__PublicBaseUrl: ${API_PUBLIC_URL:?API_PUBLIC_URL is required}
+      FileStorage__SigningKey: ${FILE_STORAGE_SIGNING_KEY:?FILE_STORAGE_SIGNING_KEY is required}
+      FileStorage__S3__BucketName: ${FILE_STORAGE_S3_BUCKET:?FILE_STORAGE_S3_BUCKET is required}
+      FileStorage__S3__Region: ${FILE_STORAGE_S3_REGION:-us-east-1}
+      FileStorage__S3__AccessKeyId: ${FILE_STORAGE_S3_ACCESS_KEY_ID:-}
+      FileStorage__S3__SecretAccessKey: ${FILE_STORAGE_S3_SECRET_ACCESS_KEY:-}
+      Payments__Provider: Stripe
+      Payments__ApiKey: ${PAYMENTS_API_KEY:?PAYMENTS_API_KEY is required}
+      Payments__WebhookSecret: ${PAYMENTS_WEBHOOK_SECRET:?PAYMENTS_WEBHOOK_SECRET is required}
+      Payments__CheckoutBaseUrl: ${APP_ORIGIN}/billing/checkout
+      Payments__ProductionCheckoutBaseUrl: ${APP_ORIGIN}/billing
+      Observability__UseJsonConsole: "true"
+      RateLimiting__Enabled: "true"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    networks: [backend, edge]
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-startupconnect-frontend:latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+    depends_on: [api]
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    networks: [edge]
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?APP_DOMAIN is required}
+      API_DOMAIN: ${API_DOMAIN:?API_DOMAIN is required}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    depends_on: [api, frontend]
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      edge:
+        ipv4_address: ${CADDY_PROXY_IP:-172.29.0.10}
+
+networks:
+  backend:
+    internal: true
+  edge:
+    ipam:
+      config:
+        - subnet: ${EDGE_SUBNET:-172.29.0.0/24}
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

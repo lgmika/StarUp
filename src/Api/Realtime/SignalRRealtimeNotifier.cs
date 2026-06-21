@@ -2,28 +2,46 @@ using Microsoft.AspNetCore.SignalR;
 using StartupConnect.Api.Hubs;
 using StartupConnect.Application.Realtime;
 using StartupConnect.Application.Realtime.Interfaces;
+using StartupConnect.Application.Admin.Interfaces;
 
 namespace StartupConnect.Api.Realtime;
 
-public sealed class SignalRRealtimeNotifier(IHubContext<StartupConnectHub> hubContext) : IRealtimeNotifier
+public sealed class SignalRRealtimeNotifier(
+    IHubContext<StartupConnectHub> hubContext,
+    ISystemSettingReader systemSettingReader) : IRealtimeNotifier
 {
-    public Task NotifyUserAsync(Guid userId, string eventName, object payload, CancellationToken cancellationToken)
+    public async Task NotifyUserAsync(Guid userId, string eventName, object payload, CancellationToken cancellationToken)
     {
-        return hubContext.Clients
+        if (!await IsEnabledAsync(cancellationToken))
+        {
+            return;
+        }
+
+        await hubContext.Clients
             .Group(RealtimeGroups.User(userId))
             .SendAsync(eventName, payload, cancellationToken);
     }
 
-    public Task NotifyProjectAsync(Guid projectId, string eventName, object payload, CancellationToken cancellationToken)
+    public async Task NotifyProjectAsync(Guid projectId, string eventName, object payload, CancellationToken cancellationToken)
     {
-        return hubContext.Clients
+        if (!await IsEnabledAsync(cancellationToken))
+        {
+            return;
+        }
+
+        await hubContext.Clients
             .Group(RealtimeGroups.Project(projectId))
             .SendAsync(eventName, payload, cancellationToken);
     }
 
-    public Task NotifyConversationAsync(Guid conversationId, string eventName, object payload, CancellationToken cancellationToken)
+    public async Task NotifyConversationAsync(Guid conversationId, string eventName, object payload, CancellationToken cancellationToken)
     {
-        return hubContext.Clients
+        if (!await IsEnabledAsync(cancellationToken))
+        {
+            return;
+        }
+
+        await hubContext.Clients
             .Group(RealtimeGroups.Conversation(conversationId))
             .SendAsync(eventName, payload, cancellationToken);
     }
@@ -103,10 +121,20 @@ public sealed class SignalRRealtimeNotifier(IHubContext<StartupConnectHub> hubCo
         }
     }
 
-    public Task ReportChangedAsync(Guid reportId, object report, CancellationToken cancellationToken)
+    public async Task ReportChangedAsync(Guid reportId, object report, CancellationToken cancellationToken)
     {
-        return hubContext.Clients
+        if (!await IsEnabledAsync(cancellationToken))
+        {
+            return;
+        }
+
+        await hubContext.Clients
             .Group("moderators")
             .SendAsync(RealtimeEventNames.ReportChanged, new { reportId, report }, cancellationToken);
+    }
+
+    private Task<bool> IsEnabledAsync(CancellationToken cancellationToken)
+    {
+        return systemSettingReader.GetBooleanAsync("Realtime.Enabled", true, cancellationToken);
     }
 }

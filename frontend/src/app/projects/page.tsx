@@ -11,8 +11,10 @@ import { Panel, PanelBody } from "@/components/ui/panel";
 import { getApiErrorMessage } from "@/lib/api";
 import { projectService } from "@/services";
 import type { ProjectSummaryDto } from "@/types/project";
+import { PublicSessionActions } from "@/components/auth/public-session-actions";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
+const PAGE_SIZE = 12;
 
 export default function ProjectDiscoveryPage() {
   const [projects, setProjects] = useState<ProjectSummaryDto[]>([]);
@@ -20,6 +22,9 @@ export default function ProjectDiscoveryPage() {
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [state, setState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(projects.length / PAGE_SIZE));
+  const visibleProjects = useMemo(() => projects.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [page, projects]);
 
   const resultLabel = useMemo(() => {
     if (state === "loading") return "Loading";
@@ -33,6 +38,7 @@ export default function ProjectDiscoveryPage() {
     try {
       const nextProjects = await projectService.listProjects(search);
       setProjects(nextProjects);
+      setPage(1);
       setState("ready");
     } catch (loadError) {
       setError(getApiErrorMessage(loadError));
@@ -71,17 +77,7 @@ export default function ProjectDiscoveryPage() {
               <span className="block truncate text-xs text-muted-foreground">Project discovery</span>
             </span>
           </Link>
-          <div className="flex items-center gap-2">
-            <Link className="text-sm font-medium text-muted-foreground hover:text-foreground" href="/auth/login">
-              Sign in
-            </Link>
-            <Link
-              className="inline-flex h-9 items-center justify-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-              href="/auth/register"
-            >
-              Join
-            </Link>
-          </div>
+          <PublicSessionActions />
         </div>
       </header>
 
@@ -157,11 +153,12 @@ export default function ProjectDiscoveryPage() {
 
           {state === "ready" && projects.length > 0 ? (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {projects.map((project) => (
+              {visibleProjects.map((project) => (
                 <ProjectCard key={project.id} project={project} />
               ))}
             </div>
           ) : null}
+          {state === "ready" && pageCount > 1 ? <div className="mt-6 flex items-center justify-center gap-3"><Button variant="outline" disabled={page === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</Button><span className="text-sm text-muted-foreground">Page {page} of {pageCount}</span><Button variant="outline" disabled={page === pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Next</Button></div> : null}
         </div>
       </section>
     </main>

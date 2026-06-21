@@ -15,6 +15,10 @@ public sealed class BackgroundJobTests
         Assert.Equal(15, options.IntervalMinutes);
         Assert.Equal(3, options.MaxRetryAttempts);
         Assert.True(options.BatchSize > 0);
+        Assert.Equal(30, options.EmailOutboxRetentionDays);
+        Assert.True(options.FailedEmailOutboxRetentionDays >= options.EmailOutboxRetentionDays);
+        Assert.Equal(90, options.ExecutionRetentionDays);
+        Assert.Equal(30, options.RefreshTokenRetentionDays);
         Assert.NotEqual(0, options.MaintenanceLockKey);
     }
 

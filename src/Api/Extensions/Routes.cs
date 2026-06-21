@@ -1,3 +1,5 @@
+using System.Net;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using StartupConnect.Api.Security;
@@ -46,6 +48,7 @@ using StartupConnect.Application.Subscriptions.Interfaces;
 using StartupConnect.Api.Authorization;
 using StartupConnect.Domain.Enums;
 using StartupConnect.Infrastructure.Persistence;
+using StartupConnect.Shared.Exceptions;
 using StartupConnect.Shared.Responses;
 
 namespace StartupConnect.Api.Extensions;
@@ -274,8 +277,7 @@ public static class EndpointRouteBuilderExtensions
             HttpContext httpContext,
             CancellationToken cancellationToken) =>
         {
-            using var reader = new StreamReader(httpContext.Request.Body);
-            var payload = await reader.ReadToEndAsync(cancellationToken);
+            var payload = await ReadBoundedBodyAsync(httpContext.Request, 256 * 1024, cancellationToken);
             var signature = httpContext.Request.Headers["Stripe-Signature"].FirstOrDefault()
                 ?? httpContext.Request.Headers["X-Payment-Signature"].FirstOrDefault();
             var result = await subscriptionService.HandleWebhookAsync(payload, signature, cancellationToken);
@@ -294,8 +296,8 @@ public static class EndpointRouteBuilderExtensions
             CancellationToken cancellationToken) =>
         {
             var result = await authService.RegisterAsync(request, GetIpAddress(httpContext), cancellationToken);
-            AuthCookieHelper.AppendRefreshTokenCookie(httpContext.Response, result, securityOptions.Value);
-            return Results.Ok(ApiResponse<AuthResponse>.Ok(result, "User registered successfully"));
+            var clientResult = AuthCookieHelper.PrepareClientResponse(httpContext.Response, result, securityOptions.Value);
+            return Results.Ok(ApiResponse<AuthResponse>.Ok(clientResult, "User registered successfully"));
         })
         .AllowAnonymous();
 
@@ -307,8 +309,8 @@ public static class EndpointRouteBuilderExtensions
             CancellationToken cancellationToken) =>
         {
             var result = await authService.LoginAsync(request, GetIpAddress(httpContext), cancellationToken);
-            AuthCookieHelper.AppendRefreshTokenCookie(httpContext.Response, result, securityOptions.Value);
-            return Results.Ok(ApiResponse<AuthResponse>.Ok(result, "Login completed successfully"));
+            var clientResult = AuthCookieHelper.PrepareClientResponse(httpContext.Response, result, securityOptions.Value);
+            return Results.Ok(ApiResponse<AuthResponse>.Ok(clientResult, "Login completed successfully"));
         })
         .AllowAnonymous();
 
@@ -324,8 +326,8 @@ public static class EndpointRouteBuilderExtensions
                 GetIpAddress(httpContext),
                 cancellationToken);
 
-            AuthCookieHelper.AppendRefreshTokenCookie(httpContext.Response, result, securityOptions.Value);
-            return Results.Ok(ApiResponse<AuthResponse>.Ok(result, "Token refreshed successfully"));
+            var clientResult = AuthCookieHelper.PrepareClientResponse(httpContext.Response, result, securityOptions.Value);
+            return Results.Ok(ApiResponse<AuthResponse>.Ok(clientResult, "Token refreshed successfully"));
         })
         .AllowAnonymous();
 
@@ -498,6 +500,7 @@ public static class EndpointRouteBuilderExtensions
             IFileService fileService,
             IFileStorageService fileStorageService,
             IProfileService profileService,
+            ILoggerFactory loggerFactory,
             HttpContext httpContext,
             CancellationToken cancellationToken) =>
         {
@@ -521,7 +524,18 @@ public static class EndpointRouteBuilderExtensions
             }
             catch
             {
-                await fileStorageService.DeleteAsync(storedFile.StoragePath, cancellationToken);
+                try
+                {
+                    await fileStorageService.DeleteAsync(storedFile.StoragePath, CancellationToken.None);
+                }
+                catch (Exception cleanupException)
+                {
+                    loggerFactory.CreateLogger("CvUploadCleanup").LogError(
+                        cleanupException,
+                        "Failed to remove orphaned CV object at {StoragePath}.",
+                        storedFile.StoragePath);
+                }
+
                 throw;
             }
         })
@@ -641,6 +655,8 @@ public static class EndpointRouteBuilderExtensions
             CancellationToken cancellationToken) =>
         {
             var result = await projectService.GetProjectAsync(httpContext.User, projectId, cancellationToken);
+            var visitorId = GetOrCreateProjectVisitorId(httpContext);
+            await projectService.RecordProjectViewAsync(httpContext.User, projectId, visitorId, cancellationToken);
             return Results.Ok(ApiResponse<ProjectDetailDto>.Ok(result));
         })
         .AllowAnonymous();
@@ -1528,6 +1544,31 @@ public static class EndpointRouteBuilderExtensions
             return Results.Ok(ApiResponse<BackgroundJobRunResult>.Ok(result, "Background maintenance completed"));
         });
 
+        admin.MapGet("/email-outbox", async (
+            string? status,
+            string? recipient,
+            int? page,
+            int? pageSize,
+            IAdminService adminService,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await adminService.GetEmailOutboxAsync(
+                new AdminEmailOutboxQuery(status, recipient, page ?? 1, pageSize ?? 20),
+                cancellationToken);
+            return Results.Ok(ApiResponse<AdminEmailOutboxListResponse>.Ok(result));
+        });
+
+        admin.MapPost("/email-outbox/{messageId:guid}/retry", async (
+            Guid messageId,
+            AdminRetryEmailRequest request,
+            IAdminService adminService,
+            HttpContext httpContext,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await adminService.RetryEmailAsync(httpContext.User, messageId, request, cancellationToken);
+            return Results.Ok(ApiResponse<AdminEmailOutboxDto>.Ok(result, "Email queued for retry"));
+        });
+
         moderator.MapGet("/dashboard", async (
             IModeratorService moderatorService,
             CancellationToken cancellationToken) =>
@@ -2137,6 +2178,76 @@ public static class EndpointRouteBuilderExtensions
         return httpContext.Connection.RemoteIpAddress?.ToString();
     }
 
+    private static Guid GetOrCreateProjectVisitorId(HttpContext httpContext)
+    {
+        const string cookieName = "startupconnect.project-visitor";
+
+        if (httpContext.User.Identity?.IsAuthenticated == true)
+        {
+            return Guid.Empty;
+        }
+
+        if (httpContext.Request.Cookies.TryGetValue(cookieName, out var value) && Guid.TryParse(value, out var visitorId))
+        {
+            return visitorId;
+        }
+
+        visitorId = Guid.NewGuid();
+        httpContext.Response.Cookies.Append(cookieName, visitorId.ToString("N"), new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = httpContext.Request.IsHttps,
+            SameSite = SameSiteMode.Lax,
+            MaxAge = TimeSpan.FromDays(365),
+            IsEssential = false
+        });
+        return visitorId;
+    }
+
+    public static async Task<string> ReadBoundedBodyAsync(
+        HttpRequest request,
+        int maxBytes,
+        CancellationToken cancellationToken)
+    {
+        if (maxBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxBytes));
+        }
+
+        if (request.ContentLength > maxBytes)
+        {
+            throw PayloadTooLarge();
+        }
+
+        using var buffer = new MemoryStream(Math.Min(maxBytes, 16 * 1024));
+        var chunk = new byte[16 * 1024];
+        while (true)
+        {
+            var bytesRead = await request.Body.ReadAsync(chunk, cancellationToken);
+            if (bytesRead == 0)
+            {
+                break;
+            }
+
+            if (buffer.Length + bytesRead > maxBytes)
+            {
+                throw PayloadTooLarge();
+            }
+
+            await buffer.WriteAsync(chunk.AsMemory(0, bytesRead), cancellationToken);
+        }
+
+        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length));
+    }
+
+    private static ApiException PayloadTooLarge()
+    {
+        return new ApiException(
+            "Request payload is too large",
+            (HttpStatusCode)StatusCodes.Status413PayloadTooLarge,
+            [new ErrorDetail("PayloadTooLarge", "The request body exceeds the endpoint limit", null)]);
+    }
+
     private static RefreshTokenRequest WithRefreshTokenCookieFallback(
         RefreshTokenRequest request,
         HttpContext httpContext,
@@ -2157,28 +2268,4 @@ public static class EndpointRouteBuilderExtensions
             : request;
     }
 
-    private static void ValidatePdfUpload(IFormFile file)
-    {
-        const long maxSizeInBytes = 5 * 1024 * 1024;
-
-        if (file.Length == 0)
-        {
-            throw new StartupConnect.Shared.Exceptions.ValidationException(
-                [new StartupConnect.Shared.Responses.ErrorDetail("EmptyFile", "CV file is required", "file")]);
-        }
-
-        if (file.Length > maxSizeInBytes)
-        {
-            throw new StartupConnect.Shared.Exceptions.ValidationException(
-                [new StartupConnect.Shared.Responses.ErrorDetail("FileTooLarge", "CV file must be at most 5 MB", "file")]);
-        }
-
-        var extension = Path.GetExtension(file.FileName);
-        if (!string.Equals(extension, ".pdf", StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(file.ContentType, "application/pdf", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new StartupConnect.Shared.Exceptions.ValidationException(
-                [new StartupConnect.Shared.Responses.ErrorDetail("InvalidFileType", "Only PDF CV uploads are allowed", "file")]);
-        }
-    }
 }

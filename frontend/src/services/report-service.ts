@@ -1,6 +1,6 @@
 import api from "@/lib/api";
 import type { ApiResponse } from "@/types/api";
-import type { CreateReportRequest, ReportDetailDto, ReportListResponse, ReportStatus } from "@/types/report";
+import type { CreateReportRequest, ReportDetailDto, ReportListResponse, ReportStatus, ReportTargetContextDto } from "@/types/report";
 
 export interface ReportQueryParams {
   status?: ReportStatus;
@@ -11,6 +11,10 @@ export interface ReportQueryParams {
 }
 
 export const reportService = {
+  async getTargetContext(targetType: string, targetId: string) {
+    const { data } = await api.get<ApiResponse<ReportTargetContextDto>>(`/reports/targets/${targetType}/${targetId}`);
+    return data.data;
+  },
   async create(request: CreateReportRequest) {
     const { data } = await api.post<ApiResponse<ReportDetailDto["report"]>>("/reports", request);
     return data.data;

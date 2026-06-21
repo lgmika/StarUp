@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using StartupConnect.Application.Files.Dtos;
 using StartupConnect.Application.Files.Interfaces;
+using StartupConnect.Application.Admin.Interfaces;
 using StartupConnect.Infrastructure.Persistence;
 using StartupConnect.Shared.Exceptions;
 using StartupConnect.Shared.Responses;
@@ -13,7 +14,8 @@ namespace StartupConnect.Infrastructure.Files;
 public sealed class FileService(
     AppDbContext dbContext,
     IFileStorageService fileStorageService,
-    IOptions<FileStorageOptions> optionsAccessor) : IFileService
+    IOptions<FileStorageOptions> optionsAccessor,
+    ISystemSettingReader systemSettingReader) : IFileService
 {
     private static readonly byte[] PdfSignature = "%PDF"u8.ToArray();
     private const int MaxPageSize = 100;
@@ -27,12 +29,18 @@ public sealed class FileService(
         long sizeInBytes,
         CancellationToken cancellationToken)
     {
-        ValidateCvUpload(originalFileName, contentType, sizeInBytes);
-        await ValidatePdfSignatureAsync(content, cancellationToken);
-        content.Position = 0;
+        var maxCvBytes = await systemSettingReader.GetInt64Async("FileStorage.MaxCvBytes", options.MaxCvBytes, cancellationToken);
+        ValidateCvUpload(originalFileName, contentType, sizeInBytes, maxCvBytes);
+
+        await using var bufferedContent = new MemoryStream((int)sizeInBytes);
+        await CopyWithExactLengthAsync(content, bufferedContent, sizeInBytes, cancellationToken);
+
+        bufferedContent.Position = 0;
+        await ValidatePdfSignatureAsync(bufferedContent, cancellationToken);
+        bufferedContent.Position = 0;
 
         return await fileStorageService.UploadAsync(
-            content,
+            bufferedContent,
             originalFileName,
             contentType,
             sizeInBytes,
@@ -78,7 +86,7 @@ public sealed class FileService(
         var total = await files.CountAsync(cancellationToken);
         var items = await files
             .OrderByDescending(file => file.CreatedAt)
-            .Skip((page - 1) * pageSize)
+            .Skip(Pagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .Select(file => Map(file))
             .ToArrayAsync(cancellationToken);
@@ -97,22 +105,41 @@ public sealed class FileService(
             cancellationToken)
             ?? throw new ApiException("File not found", HttpStatusCode.NotFound);
 
-        await fileStorageService.DeleteAsync(file.StoragePath, cancellationToken);
         file.IsDeleted = true;
         file.UpdatedAt = DateTimeOffset.UtcNow;
+        dbContext.AuditLogs.Add(new Domain.Entities.AuditLog
+        {
+            ActorUserId = userId,
+            Action = "File.Delete",
+            ResourceType = "StoredFile",
+            ResourceId = file.Id
+        });
         await dbContext.SaveChangesAsync(cancellationToken);
+        await fileStorageService.DeleteAsync(file.StoragePath, cancellationToken);
     }
 
-    private void ValidateCvUpload(string originalFileName, string contentType, long sizeInBytes)
+    private static void ValidateCvUpload(string originalFileName, string contentType, long sizeInBytes, long maxCvBytes)
     {
-        if (sizeInBytes == 0)
+        if (maxCvBytes is < 4 or > 100 * 1024 * 1024)
+        {
+            throw new InvalidOperationException("FileStorage:MaxCvBytes must be between 4 bytes and 100 MB.");
+        }
+
+        if (sizeInBytes <= 0)
         {
             throw new ValidationException([new ErrorDetail("EmptyFile", "CV file is required", "file")]);
         }
 
-        if (sizeInBytes > options.MaxCvBytes)
+        if (sizeInBytes > maxCvBytes)
         {
-            throw new ValidationException([new ErrorDetail("FileTooLarge", $"CV file must be at most {options.MaxCvBytes / 1024 / 1024} MB", "file")]);
+            throw new ValidationException([new ErrorDetail("FileTooLarge", $"CV file must be at most {maxCvBytes / 1024 / 1024} MB", "file")]);
+        }
+
+        if (string.IsNullOrWhiteSpace(originalFileName) ||
+            originalFileName.Length > 255 ||
+            originalFileName.Any(char.IsControl))
+        {
+            throw new ValidationException([new ErrorDetail("InvalidFileName", "File name must be between 1 and 255 characters and contain no control characters", "file")]);
         }
 
         var extension = Path.GetExtension(originalFileName);
@@ -123,9 +150,43 @@ public sealed class FileService(
         }
 
         var fileName = Path.GetFileName(originalFileName);
-        if (!string.Equals(fileName, originalFileName, StringComparison.Ordinal))
+        if (!string.Equals(fileName, originalFileName, StringComparison.Ordinal) ||
+            originalFileName.Contains('/') ||
+            originalFileName.Contains('\\'))
         {
             throw new ValidationException([new ErrorDetail("InvalidFileName", "File name must not contain path segments", "file")]);
+        }
+    }
+
+    private static async Task CopyWithExactLengthAsync(
+        Stream source,
+        Stream destination,
+        long expectedLength,
+        CancellationToken cancellationToken)
+    {
+        var buffer = new byte[81920];
+        long totalRead = 0;
+
+        while (true)
+        {
+            var read = await source.ReadAsync(buffer, cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+
+            totalRead += read;
+            if (totalRead > expectedLength)
+            {
+                throw new ValidationException([new ErrorDetail("FileSizeMismatch", "Uploaded file size does not match its content", "file")]);
+            }
+
+            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+        }
+
+        if (totalRead != expectedLength)
+        {
+            throw new ValidationException([new ErrorDetail("FileSizeMismatch", "Uploaded file size does not match its content", "file")]);
         }
     }
 

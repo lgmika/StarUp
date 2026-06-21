@@ -4,6 +4,14 @@ namespace StartupConnect.Api.Security;
 
 public static class AuthCookieHelper
 {
+    public static AuthResponse PrepareClientResponse(HttpResponse response, AuthResponse authResponse, StartupConnectSecurityOptions options)
+    {
+        AppendRefreshTokenCookie(response, authResponse, options);
+        return options.RefreshTokenCookie.Enabled
+            ? authResponse with { RefreshToken = string.Empty }
+            : authResponse;
+    }
+
     public static void AppendRefreshTokenCookie(HttpResponse response, AuthResponse authResponse, StartupConnectSecurityOptions options)
     {
         if (!options.RefreshTokenCookie.Enabled)

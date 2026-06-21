@@ -1,14 +1,17 @@
 using System.Net;
 using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using StartupConnect.Application.Nda.Dtos;
 using StartupConnect.Application.Nda.Interfaces;
+using StartupConnect.Application.Admin.Interfaces;
 using StartupConnect.Application.Realtime;
 using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Constants;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
 using StartupConnect.Infrastructure.Persistence;
+using StartupConnect.Infrastructure.Notifications;
 using StartupConnect.Shared.Exceptions;
 using StartupConnect.Shared.Responses;
 
@@ -16,13 +19,15 @@ namespace StartupConnect.Infrastructure.Nda;
 
 public sealed class NdaService(
     AppDbContext dbContext,
-    IRealtimeNotifier realtimeNotifier) : INdaService
+    IRealtimeNotifier realtimeNotifier,
+    ISystemSettingReader systemSettingReader) : INdaService
 {
     public async Task<IReadOnlyCollection<NdaTemplateDto>> GetTemplatesAsync(CancellationToken cancellationToken)
     {
         var templates = await dbContext.NdaTemplates
             .Include(template => template.Versions)
             .OrderBy(template => template.Name)
+            .Take(100)
             .ToArrayAsync(cancellationToken);
 
         return templates.Select(MapTemplate).ToArray();
@@ -34,6 +39,9 @@ public sealed class NdaService(
         await EnsureAdminAsync(userId, cancellationToken);
         ValidateRequired(request.Name, "name", "NDA template name is required");
         ValidateRequired(request.InitialContent, "initialContent", "Initial NDA content is required");
+        ValidateMaximumLength(request.Name, 180, "name");
+        ValidateMaximumLength(request.Description, 1000, "description");
+        ValidateMaximumLength(request.InitialContent, 100_000, "initialContent");
 
         var template = new NdaTemplate
         {
@@ -62,6 +70,7 @@ public sealed class NdaService(
         var userId = GetUserId(principal);
         await EnsureAdminAsync(userId, cancellationToken);
         ValidateRequired(request.Content, "content", "NDA content is required");
+        ValidateMaximumLength(request.Content, 100_000, "content");
 
         var template = await dbContext.NdaTemplates.Include(item => item.Versions)
             .FirstOrDefaultAsync(item => item.Id == templateId, cancellationToken)
@@ -134,8 +143,8 @@ public sealed class NdaService(
             TemplateVersionId = version.Id,
             VersionNumber = version.VersionNumber,
             AgreementSnapshot = version.Content,
-            IpAddress = ipAddress,
-            UserAgent = userAgent,
+            IpAddress = TruncateOrNull(ipAddress, 64),
+            UserAgent = TruncateOrNull(userAgent, 500),
             AcceptedAt = DateTimeOffset.UtcNow
         };
 
@@ -168,11 +177,39 @@ public sealed class NdaService(
             }
         }
 
-        AddNotification(project.OwnerUserId, "NDA accepted", "A user accepted the project NDA.", agreement.Id, "NdaAgreement");
+        var notification = await systemSettingReader.GetBooleanAsync("Notifications.Enabled", true, cancellationToken)
+            ? AddNotification(
+                project.OwnerUserId,
+                "NDA accepted",
+                "A user accepted the project NDA.",
+                agreement.Id,
+                "NdaAgreement",
+                $"/projects/{projectId}")
+            : null;
         AddAudit(userId, "NDA.Accept", "Project", projectId, null);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (
+            exception.InnerException is PostgresException
+            {
+                SqlState: PostgresErrorCodes.UniqueViolation,
+                ConstraintName: "IX_nda_agreements_ProjectId_UserId_TemplateVersionId"
+            })
+        {
+            dbContext.ChangeTracker.Clear();
+            var concurrentAgreement = await dbContext.NdaAgreements.AsNoTracking().FirstAsync(
+                item => item.ProjectId == projectId && item.UserId == userId && item.TemplateVersionId == version.Id,
+                cancellationToken);
+            return MapAgreement(concurrentAgreement);
+        }
 
         var result = MapAgreement(agreement);
+        if (notification is not null)
+        {
+            await realtimeNotifier.NotificationCreatedAsync(project.OwnerUserId, notification.ToDto(), cancellationToken);
+        }
         await realtimeNotifier.NotifyProjectAsync(projectId, RealtimeEventNames.NdaAgreementAccepted, result, cancellationToken);
         await realtimeNotifier.NotifyUserAsync(project.OwnerUserId, RealtimeEventNames.NdaAgreementAccepted, result, cancellationToken);
         if (pendingInterest is not null)
@@ -213,6 +250,7 @@ public sealed class NdaService(
         var agreements = await dbContext.NdaAgreements
             .Where(agreement => agreement.ProjectId == projectId)
             .OrderByDescending(agreement => agreement.AcceptedAt)
+            .Take(500)
             .ToArrayAsync(cancellationToken);
 
         return agreements.Select(MapAgreement).ToArray();
@@ -224,6 +262,7 @@ public sealed class NdaService(
         var agreements = await dbContext.NdaAgreements
             .Where(agreement => agreement.UserId == userId)
             .OrderByDescending(agreement => agreement.AcceptedAt)
+            .Take(500)
             .ToArrayAsync(cancellationToken);
 
         return agreements.Select(MapAgreement).ToArray();
@@ -299,17 +338,20 @@ public sealed class NdaService(
             agreement.UserAgent);
     }
 
-    private void AddNotification(Guid userId, string title, string message, Guid resourceId, string resourceType)
+    private Notification AddNotification(Guid userId, string title, string message, Guid resourceId, string resourceType, string actionUrl)
     {
-        dbContext.Notifications.Add(new Notification
+        var notification = new Notification
         {
             UserId = userId,
-            Type = NotificationType.System,
+            Type = NotificationType.NDA,
             Title = title,
             Message = message,
             ResourceId = resourceId,
-            ResourceType = resourceType
-        });
+            ResourceType = resourceType,
+            ActionUrl = actionUrl
+        };
+        dbContext.Notifications.Add(notification);
+        return notification;
     }
 
     private void AddAudit(Guid actorUserId, string action, string resourceType, Guid resourceId, string? reason)
@@ -330,6 +372,25 @@ public sealed class NdaService(
         {
             throw new ValidationException([new ErrorDetail("Required", message, field)]);
         }
+    }
+
+    private static void ValidateMaximumLength(string? value, int maximum, string field)
+    {
+        if (!string.IsNullOrWhiteSpace(value) && value.Trim().Length > maximum)
+        {
+            throw new ValidationException([new ErrorDetail("TooLong", $"{field} must be at most {maximum} characters", field)]);
+        }
+    }
+
+    private static string? TruncateOrNull(string? value, int maximum)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var trimmed = value.Trim();
+        return trimmed[..Math.Min(trimmed.Length, maximum)];
     }
 
     private static Guid GetUserId(ClaimsPrincipal principal)

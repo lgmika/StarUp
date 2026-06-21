@@ -1,7 +1,10 @@
 **/bin/
 **/obj/
+**/node_modules/
+**/.next/
+**/playwright-report/
+**/test-results/
 .git/
 .vs/
 .vscode/
-.env
-
+**/.env*

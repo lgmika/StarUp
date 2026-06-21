@@ -3,8 +3,13 @@ import type { ApiResponse } from "@/types/api";
 import type { NotificationDto, NotificationListResponse, UnreadCountDto } from "@/types/notification";
 
 export const notificationService = {
+  async list(params: { status?: string; type?: string; page?: number; pageSize?: number } = {}) {
+    const { data } = await api.get<ApiResponse<NotificationListResponse>>("/notifications", { params });
+    return data.data;
+  },
+
   async listNotifications() {
-    const { data } = await api.get<ApiResponse<NotificationListResponse>>("/notifications");
+    const { data } = await api.get<ApiResponse<NotificationListResponse>>("/notifications", { params: { page: 1, pageSize: 20 } });
     return data.data.items;
   },
 

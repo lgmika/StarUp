@@ -48,7 +48,7 @@ public sealed class ActivityService(AppDbContext dbContext) : IActivityService
         var total = await visible.CountAsync(cancellationToken);
         var items = await visible
             .OrderByDescending(activity => activity.CreatedAt)
-            .Skip((page - 1) * pageSize)
+            .Skip(Pagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .Select(activity => Map(activity))
             .ToArrayAsync(cancellationToken);

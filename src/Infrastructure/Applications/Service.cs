@@ -1,13 +1,16 @@
 using System.Net;
 using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using StartupConnect.Application.Applications.Dtos;
 using StartupConnect.Application.Applications.Interfaces;
+using StartupConnect.Application.Admin.Interfaces;
 using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Constants;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
 using StartupConnect.Infrastructure.Persistence;
+using StartupConnect.Infrastructure.Notifications;
 using StartupConnect.Shared.Exceptions;
 using StartupConnect.Shared.Responses;
 
@@ -15,7 +18,8 @@ namespace StartupConnect.Infrastructure.Applications;
 
 public sealed class ApplicationService(
     AppDbContext dbContext,
-    IRealtimeNotifier realtimeNotifier) : IApplicationService
+    IRealtimeNotifier realtimeNotifier,
+    ISystemSettingReader systemSettingReader) : IApplicationService
 {
     public async Task<ApplicationDto> ApplyAsync(ClaimsPrincipal principal, Guid projectId, ApplyProjectRequest request, CancellationToken cancellationToken)
     {
@@ -43,6 +47,11 @@ public sealed class ApplicationService(
         if (isMemberOrFounder)
         {
             throw new ApiException("Project members cannot apply to their own project", HttpStatusCode.Conflict);
+        }
+
+        if (!await CanApplyToProjectAsync(projectId, userId, cancellationToken))
+        {
+            throw new ApiException("You do not have permission to apply to this project", HttpStatusCode.Forbidden);
         }
 
         var duplicate = await dbContext.ProjectApplications.AnyAsync(
@@ -74,12 +83,38 @@ public sealed class ApplicationService(
 
         dbContext.ProjectApplications.Add(application);
         AddHistory(application, ApplicationStatus.Pending, ApplicationStatus.Pending, userId, "Application submitted");
-        AddNotification(project.OwnerUserId, "New project application", $"A new member applied to {project.Title}.", project.Id, "Project");
+        var notification = await systemSettingReader.GetBooleanAsync("Notifications.Enabled", true, cancellationToken)
+            ? AddNotification(
+                project.OwnerUserId,
+                "New project application",
+                $"A new member applied to {project.Title}.",
+                application.Id,
+                "ProjectApplication",
+                $"/projects/{project.Id}/applications/{application.Id}")
+            : null;
         AddAudit(userId, "Application.Submit", "ProjectApplication", application.Id, null);
         AddActivity(projectId, userId, ActivityType.ApplicationReceived, ActivityVisibility.MembersOnly, "Application received", "A new member application was received.", "ProjectApplication", application.Id);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (
+            exception.InnerException is PostgresException
+            {
+                SqlState: PostgresErrorCodes.UniqueViolation,
+                ConstraintName: "IX_project_applications_ProjectId_ApplicantUserId"
+            })
+        {
+            throw new ApiException("You already applied to this project", HttpStatusCode.Conflict);
+        }
 
-        return await GetApplicationDtoAsync(application.Id, cancellationToken);
+        var result = await GetApplicationDtoAsync(application.Id, cancellationToken);
+        if (notification is not null)
+        {
+            await realtimeNotifier.NotificationCreatedAsync(project.OwnerUserId, notification.ToDto(), cancellationToken);
+        }
+        await realtimeNotifier.ApplicationStatusChangedAsync(userId, projectId, result, cancellationToken);
+        return result;
     }
 
     public async Task<IReadOnlyCollection<ApplicationDto>> GetProjectApplicationsAsync(ClaimsPrincipal principal, Guid projectId, CancellationToken cancellationToken)
@@ -90,6 +125,7 @@ public sealed class ApplicationService(
         return await QueryApplications()
             .Where(application => application.ProjectId == projectId)
             .OrderByDescending(application => application.CreatedAt)
+            .Take(200)
             .Select(application => MapApplication(application))
             .ToArrayAsync(cancellationToken);
     }
@@ -112,6 +148,7 @@ public sealed class ApplicationService(
         var history = await dbContext.ApplicationStatusHistories
             .Where(item => item.ApplicationId == applicationId)
             .OrderBy(item => item.CreatedAt)
+            .Take(500)
             .Select(item => new ApplicationStatusHistoryDto(item.Id, item.FromStatus, item.ToStatus, item.ChangedByUserId, item.Reason, item.CreatedAt))
             .ToArrayAsync(cancellationToken);
 
@@ -125,6 +162,7 @@ public sealed class ApplicationService(
         return await QueryApplications()
             .Where(application => application.ApplicantUserId == userId)
             .OrderByDescending(application => application.CreatedAt)
+            .Take(200)
             .Select(application => MapApplication(application))
             .ToArrayAsync(cancellationToken);
     }
@@ -132,6 +170,7 @@ public sealed class ApplicationService(
     public async Task WithdrawAsync(ClaimsPrincipal principal, Guid projectId, Guid applicationId, ApplicationDecisionRequest request, CancellationToken cancellationToken)
     {
         var userId = GetUserId(principal);
+        await using var transaction = await BeginApplicationTransitionAsync(applicationId, cancellationToken);
         var application = await dbContext.ProjectApplications.FirstOrDefaultAsync(
             item => item.Id == applicationId && item.ProjectId == projectId,
             cancellationToken)
@@ -147,7 +186,9 @@ public sealed class ApplicationService(
             throw new ApiException("Application cannot be withdrawn from its current status", HttpStatusCode.BadRequest);
         }
 
-        await ChangeStatusAsync(application, ApplicationStatus.Withdrawn, userId, request, cancellationToken);
+        var change = await ChangeStatusAsync(application, ApplicationStatus.Withdrawn, userId, request, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        await PublishApplicationChangeAsync(change, cancellationToken);
     }
 
     public Task<ApplicationDto> ShortlistAsync(ClaimsPrincipal principal, Guid projectId, Guid applicationId, ApplicationDecisionRequest request, CancellationToken cancellationToken)
@@ -160,28 +201,9 @@ public sealed class ApplicationService(
         return FounderTransitionAsync(principal, projectId, applicationId, ApplicationStatus.Interviewing, request, cancellationToken);
     }
 
-    public async Task<ApplicationDto> AcceptAsync(ClaimsPrincipal principal, Guid projectId, Guid applicationId, ApplicationDecisionRequest request, CancellationToken cancellationToken)
+    public Task<ApplicationDto> AcceptAsync(ClaimsPrincipal principal, Guid projectId, Guid applicationId, ApplicationDecisionRequest request, CancellationToken cancellationToken)
     {
-        var result = await FounderTransitionAsync(principal, projectId, applicationId, ApplicationStatus.Accepted, request, cancellationToken);
-
-        var exists = await dbContext.ProjectMembers.AnyAsync(
-            member => member.ProjectId == projectId && member.UserId == result.ApplicantUserId,
-            cancellationToken);
-
-        if (!exists)
-        {
-            dbContext.ProjectMembers.Add(new ProjectMember
-            {
-                ProjectId = projectId,
-                UserId = result.ApplicantUserId,
-                Role = ProjectMemberRole.Member
-            });
-            AddActivity(projectId, result.ApplicantUserId, ActivityType.MemberJoined, ActivityVisibility.MembersOnly, "Member joined", "An accepted applicant joined the project.", "ProjectMember", result.ApplicantUserId);
-            AddAudit(GetUserId(principal), "Application.Accept.CreateProjectMember", "Project", projectId, request.Reason);
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
-
-        return await GetApplicationDtoAsync(applicationId, cancellationToken);
+        return FounderTransitionAsync(principal, projectId, applicationId, ApplicationStatus.Accepted, request, cancellationToken);
     }
 
     public Task<ApplicationDto> RejectAsync(ClaimsPrincipal principal, Guid projectId, Guid applicationId, ApplicationDecisionRequest request, CancellationToken cancellationToken)
@@ -199,6 +221,7 @@ public sealed class ApplicationService(
     {
         var userId = GetUserId(principal);
         await EnsureCanManageProjectAsync(projectId, userId, cancellationToken);
+        await using var transaction = await BeginApplicationTransitionAsync(applicationId, cancellationToken);
 
         var application = await dbContext.ProjectApplications
             .Include(item => item.Project)
@@ -206,18 +229,42 @@ public sealed class ApplicationService(
             ?? throw new ApiException("Application not found", HttpStatusCode.NotFound);
 
         ValidateFounderTransition(application.Status, nextStatus);
-        await ChangeStatusAsync(application, nextStatus, userId, request, cancellationToken);
+        var change = await ChangeStatusAsync(application, nextStatus, userId, request, cancellationToken);
 
-        return await GetApplicationDtoAsync(applicationId, cancellationToken);
+        if (nextStatus == ApplicationStatus.Accepted)
+        {
+            var exists = await dbContext.ProjectMembers.AnyAsync(
+                member => member.ProjectId == projectId && member.UserId == change.Application.ApplicantUserId,
+                cancellationToken);
+
+            if (!exists)
+            {
+                dbContext.ProjectMembers.Add(new ProjectMember
+                {
+                    ProjectId = projectId,
+                    UserId = change.Application.ApplicantUserId,
+                    Role = ProjectMemberRole.Member
+                });
+                AddActivity(projectId, change.Application.ApplicantUserId, ActivityType.MemberJoined, ActivityVisibility.MembersOnly, "Member joined", "An accepted applicant joined the project.", "ProjectMember", change.Application.ApplicantUserId);
+                AddAudit(userId, "Application.Accept.CreateProjectMember", "Project", projectId, request.Reason);
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        await PublishApplicationChangeAsync(change, cancellationToken);
+        return change.Application;
     }
 
-    private async Task ChangeStatusAsync(
+    private async Task<ApplicationStatusChangeResult> ChangeStatusAsync(
         ProjectApplication application,
         ApplicationStatus nextStatus,
         Guid changedByUserId,
         ApplicationDecisionRequest request,
         CancellationToken cancellationToken)
     {
+        ValidateMaximumLength(request.Reason, 1000, "reason");
+        ValidateMaximumLength(request.FounderNote, 1000, "founderNote");
         var previous = application.Status;
         application.Status = nextStatus;
         application.FounderNote = string.IsNullOrWhiteSpace(request.FounderNote) ? application.FounderNote : request.FounderNote.Trim();
@@ -228,7 +275,15 @@ public sealed class ApplicationService(
         }
 
         AddHistory(application, previous, nextStatus, changedByUserId, request.Reason);
-        AddNotification(application.ApplicantUserId, "Application status updated", $"Your application status is now {nextStatus}.", application.Id, "ProjectApplication");
+        var notification = await systemSettingReader.GetBooleanAsync("Notifications.Enabled", true, cancellationToken)
+            ? AddNotification(
+                application.ApplicantUserId,
+                "Application status updated",
+                $"Your application status is now {nextStatus}.",
+                application.Id,
+                "ProjectApplication",
+                $"/applications/{application.Id}")
+            : null;
         AddAudit(changedByUserId, $"Application.Status.{nextStatus}", "ProjectApplication", application.Id, request.Reason);
         if (nextStatus == ApplicationStatus.Accepted)
         {
@@ -237,8 +292,44 @@ public sealed class ApplicationService(
 
         await dbContext.SaveChangesAsync(cancellationToken);
         var result = await GetApplicationDtoAsync(application.Id, cancellationToken);
-        await realtimeNotifier.ApplicationStatusChangedAsync(application.ApplicantUserId, application.ProjectId, result, cancellationToken);
+        return new ApplicationStatusChangeResult(result, notification);
     }
+
+    private async Task<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction> BeginApplicationTransitionAsync(
+        Guid applicationId,
+        CancellationToken cancellationToken)
+    {
+        var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var lockResource = $"application-transition:{applicationId:N}";
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({lockResource}, 0))",
+                cancellationToken);
+            return transaction;
+        }
+        catch
+        {
+            await transaction.DisposeAsync();
+            throw;
+        }
+    }
+
+    private async Task PublishApplicationChangeAsync(ApplicationStatusChangeResult change, CancellationToken cancellationToken)
+    {
+        if (change.Notification is not null)
+        {
+            await realtimeNotifier.NotificationCreatedAsync(change.Application.ApplicantUserId, change.Notification.ToDto(), cancellationToken);
+        }
+
+        await realtimeNotifier.ApplicationStatusChangedAsync(
+            change.Application.ApplicantUserId,
+            change.Application.ProjectId,
+            change.Application,
+            cancellationToken);
+    }
+
+    private sealed record ApplicationStatusChangeResult(ApplicationDto Application, Notification? Notification);
 
     private static void ValidateFounderTransition(ApplicationStatus currentStatus, ApplicationStatus nextStatus)
     {
@@ -321,6 +412,52 @@ public sealed class ApplicationService(
             cancellationToken);
     }
 
+    private async Task<bool> CanApplyToProjectAsync(Guid projectId, Guid userId, CancellationToken cancellationToken)
+    {
+        var setting = await dbContext.ProjectVisibilitySettings
+            .Where(item => item.ProjectId == projectId)
+            .Select(item => new { item.Visibility, item.RequiresNda })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (setting is null)
+        {
+            return false;
+        }
+
+        if (setting.Visibility is ProjectVisibility.Public or ProjectVisibility.Limited)
+        {
+            return true;
+        }
+
+        var hasAccessGrant = await dbContext.ProjectAccessGrants.AnyAsync(
+            grant => grant.ProjectId == projectId &&
+                grant.UserId == userId &&
+                (grant.ExpiresAt == null || grant.ExpiresAt > DateTimeOffset.UtcNow),
+            cancellationToken);
+        if (hasAccessGrant)
+        {
+            return true;
+        }
+
+        if (!setting.RequiresNda)
+        {
+            return false;
+        }
+
+        var activeVersionId = await dbContext.NdaTemplateVersions
+            .Where(version => version.IsPublished && version.Template.IsActive)
+            .OrderByDescending(version => version.CreatedAt)
+            .ThenByDescending(version => version.VersionNumber)
+            .Select(version => (Guid?)version.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return activeVersionId.HasValue && await dbContext.NdaAgreements.AnyAsync(
+            agreement => agreement.ProjectId == projectId &&
+                agreement.UserId == userId &&
+                agreement.TemplateVersionId == activeVersionId.Value,
+            cancellationToken);
+    }
+
     private void AddHistory(ProjectApplication application, ApplicationStatus fromStatus, ApplicationStatus toStatus, Guid changedByUserId, string? reason)
     {
         dbContext.ApplicationStatusHistories.Add(new ApplicationStatusHistory
@@ -333,17 +470,20 @@ public sealed class ApplicationService(
         });
     }
 
-    private void AddNotification(Guid userId, string title, string message, Guid resourceId, string resourceType)
+    private Notification AddNotification(Guid userId, string title, string message, Guid resourceId, string resourceType, string actionUrl)
     {
-        dbContext.Notifications.Add(new Notification
+        var notification = new Notification
         {
             UserId = userId,
-            Type = NotificationType.ProjectModeration,
+            Type = NotificationType.Application,
             Title = title,
             Message = message,
             ResourceId = resourceId,
-            ResourceType = resourceType
-        });
+            ResourceType = resourceType,
+            ActionUrl = actionUrl
+        };
+        dbContext.Notifications.Add(notification);
+        return notification;
     }
 
     private void AddAudit(Guid actorUserId, string action, string resourceType, Guid resourceId, string? reason)
@@ -383,6 +523,14 @@ public sealed class ApplicationService(
         if (coverLetter.Trim().Length > 3000)
         {
             throw new ValidationException([new ErrorDetail("CoverLetterTooLong", "Cover letter must be at most 3000 characters", "coverLetter")]);
+        }
+    }
+
+    private static void ValidateMaximumLength(string? value, int maximum, string field)
+    {
+        if (!string.IsNullOrWhiteSpace(value) && value.Trim().Length > maximum)
+        {
+            throw new ValidationException([new ErrorDetail("TooLong", $"{field} must be at most {maximum} characters", field)]);
         }
     }
 

@@ -9,6 +9,8 @@ public interface IProjectService
 
     Task<ProjectDetailDto> GetProjectAsync(ClaimsPrincipal? principal, Guid projectId, CancellationToken cancellationToken);
 
+    Task RecordProjectViewAsync(ClaimsPrincipal? principal, Guid projectId, Guid visitorId, CancellationToken cancellationToken);
+
     Task<ProjectDetailDto> CreateDraftAsync(ClaimsPrincipal principal, CreateProjectDraftRequest request, CancellationToken cancellationToken);
 
     Task<ProjectDetailDto> UpdateProjectAsync(ClaimsPrincipal principal, Guid projectId, UpdateProjectRequest request, CancellationToken cancellationToken);
@@ -31,4 +33,3 @@ public interface IProjectService
 
     Task<IReadOnlyCollection<ProjectSummaryDto>> GetSavedProjectsAsync(ClaimsPrincipal principal, CancellationToken cancellationToken);
 }
-

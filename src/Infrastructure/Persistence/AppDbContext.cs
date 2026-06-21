@@ -23,6 +23,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 
     public DbSet<EmailVerificationToken> EmailVerificationTokens => Set<EmailVerificationToken>();
 
+    public DbSet<EmailOutboxMessage> EmailOutboxMessages => Set<EmailOutboxMessage>();
+
     public DbSet<PasswordResetToken> PasswordResetTokens => Set<PasswordResetToken>();
 
     public DbSet<UserProfile> UserProfiles => Set<UserProfile>();
@@ -38,6 +40,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<StoredFile> Files => Set<StoredFile>();
 
     public DbSet<Project> Projects => Set<Project>();
+
+    public DbSet<ProjectView> ProjectViews => Set<ProjectView>();
 
     public DbSet<ProjectVersion> ProjectVersions => Set<ProjectVersion>();
 
@@ -235,6 +239,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 
             entity.Property(refreshToken => refreshToken.TokenHash).HasMaxLength(128).IsRequired();
             entity.Property(refreshToken => refreshToken.ReplacedByTokenHash).HasMaxLength(128);
+            entity.Property(refreshToken => refreshToken.RevokedAt).IsConcurrencyToken();
             entity.Property(refreshToken => refreshToken.CreatedByIp).HasMaxLength(64);
             entity.Property(refreshToken => refreshToken.RevokedByIp).HasMaxLength(64);
 
@@ -270,6 +275,23 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .WithMany()
                 .HasForeignKey(token => token.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<EmailOutboxMessage>(entity =>
+        {
+            entity.ToTable("email_outbox_messages");
+            entity.HasKey(message => message.Id);
+            entity.HasIndex(message => new { message.SentAt, message.NextAttemptAt, message.LockedUntil });
+            entity.Property(message => message.Recipient).HasMaxLength(255).IsRequired();
+            entity.Property(message => message.Template).HasMaxLength(80).IsRequired();
+            entity.Property(message => message.ProtectedPayload).HasMaxLength(12000).IsRequired();
+            entity.Property(message => message.LastError).HasMaxLength(1000);
+            entity.Property(message => message.LeaseId).IsConcurrencyToken();
+
+            entity.HasOne(message => message.User)
+                .WithMany()
+                .HasForeignKey(message => message.UserId)
+                .OnDelete(DeleteBehavior.SetNull);
         });
 
         modelBuilder.Entity<UserProfile>(entity =>
@@ -563,12 +585,34 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
+        modelBuilder.Entity<ProjectView>(entity =>
+        {
+            entity.ToTable("project_views", table => table.HasCheckConstraint(
+                "CK_project_views_viewer",
+                "(\"ViewerUserId\" IS NOT NULL AND \"VisitorId\" IS NULL) OR (\"ViewerUserId\" IS NULL AND \"VisitorId\" IS NOT NULL)"));
+            entity.HasKey(view => view.Id);
+            entity.HasIndex(view => new { view.ProjectId, view.ViewerUserId, view.ViewedOn }).IsUnique();
+            entity.HasIndex(view => new { view.ProjectId, view.VisitorId, view.ViewedOn }).IsUnique();
+            entity.HasIndex(view => new { view.ProjectId, view.CreatedAt });
+
+            entity.HasOne(view => view.Project)
+                .WithMany()
+                .HasForeignKey(view => view.ProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(view => view.ViewerUser)
+                .WithMany()
+                .HasForeignKey(view => view.ViewerUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
         modelBuilder.Entity<AIRequest>(entity =>
         {
             entity.ToTable("ai_requests");
             entity.HasKey(request => request.Id);
             entity.HasIndex(request => new { request.UserId, request.CreatedAt });
             entity.Property(request => request.PromptSnapshot).HasMaxLength(4000).IsRequired();
+            entity.Property(request => request.ResponseSnapshot).HasColumnType("text");
             entity.Property(request => request.Provider).HasMaxLength(80).IsRequired();
 
             entity.HasOne(request => request.User)
@@ -959,6 +1003,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.ToTable("conversation_participants");
             entity.HasKey(participant => participant.Id);
             entity.HasIndex(participant => new { participant.ConversationId, participant.UserId }).IsUnique();
+            entity.HasIndex(participant => new { participant.UserId, participant.ConversationId });
 
             entity.HasOne(participant => participant.Conversation)
                 .WithMany()
@@ -976,6 +1021,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.ToTable("messages");
             entity.HasKey(message => message.Id);
             entity.HasIndex(message => new { message.ConversationId, message.CreatedAt });
+            entity.HasIndex(message => new { message.SenderUserId, message.CreatedAt });
             entity.Property(message => message.Content).HasMaxLength(4000).IsRequired();
 
             entity.HasOne(message => message.Conversation)

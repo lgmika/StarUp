@@ -1,14 +1,17 @@
 using System.Net;
 using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using StartupConnect.Application.Investors.Dtos;
 using StartupConnect.Application.Investors.Interfaces;
+using StartupConnect.Application.Admin.Interfaces;
 using StartupConnect.Application.Projects.Dtos;
 using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Constants;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
 using StartupConnect.Infrastructure.Persistence;
+using StartupConnect.Infrastructure.Notifications;
 using StartupConnect.Shared.Exceptions;
 using StartupConnect.Shared.Responses;
 
@@ -16,7 +19,8 @@ namespace StartupConnect.Infrastructure.Investors;
 
 public sealed class InvestorService(
     AppDbContext dbContext,
-    IRealtimeNotifier realtimeNotifier) : IInvestorService
+    IRealtimeNotifier realtimeNotifier,
+    ISystemSettingReader systemSettingReader) : IInvestorService
 {
     public async Task<InvestorProfileDto> GetMyProfileAsync(ClaimsPrincipal principal, CancellationToken cancellationToken)
     {
@@ -96,18 +100,40 @@ public sealed class InvestorService(
                   project.Status == ProjectStatus.Published &&
                   (setting.Visibility == ProjectVisibility.Public ||
                    setting.Visibility == ProjectVisibility.Limited ||
+                   setting.Visibility == ProjectVisibility.NdaRequired ||
                    setting.Visibility == ProjectVisibility.InvestorOnly)
-            select new { project, setting.Visibility };
+            select new
+            {
+                project,
+                setting.Visibility,
+                InvestorSummary = dbContext.AIRequests
+                    .Where(request =>
+                        request.ProjectId == project.Id &&
+                        request.RequestType == AIRequestType.InvestorSummary &&
+                        request.IsSuccessful &&
+                        request.ResponseSnapshot != null)
+                    .OrderByDescending(request => request.CreatedAt)
+                    .Select(request => request.ResponseSnapshot)
+                    .FirstOrDefault()
+            };
 
         if (!string.IsNullOrWhiteSpace(search))
         {
+            if (search.Trim().Length > 200)
+            {
+                throw new ValidationException([new ErrorDetail("SearchTooLong", "Search must be at most 200 characters", "search")]);
+            }
+
             var keyword = search.Trim().ToLowerInvariant();
             query = query.Where(item =>
                 item.project.Title.ToLower().Contains(keyword) ||
                 item.project.Summary.ToLower().Contains(keyword));
         }
 
-        var items = await query.OrderByDescending(item => item.project.CreatedAt).ToArrayAsync(cancellationToken);
+        var items = await query
+            .OrderByDescending(item => item.project.CreatedAt)
+            .Take(200)
+            .ToArrayAsync(cancellationToken);
         return items.Select(item => new InvestorProjectDiscoveryDto(
             new ProjectSummaryDto(
                 item.project.Id,
@@ -119,7 +145,7 @@ public sealed class InvestorService(
                 item.Visibility,
                 item.project.IsRecruiting,
                 item.project.CreatedAt),
-            $"Mock investor summary: {item.project.Title} is at {item.project.Stage} stage. Review market clarity, team needs, traction, and funding use."))
+            item.InvestorSummary))
             .ToArray();
     }
 
@@ -128,6 +154,7 @@ public sealed class InvestorService(
         var userId = GetUserId(principal);
         await EnsureInvestorRoleAsync(userId, cancellationToken);
         ValidateRequired(request.Message, "message", "Investor interest message is required");
+        ValidateMaximumLength(request.Message, 2000, "message");
 
         var project = await dbContext.Projects.FirstOrDefaultAsync(item => item.Id == projectId && !item.IsDeleted, cancellationToken)
             ?? throw new ApiException("Project not found", HttpStatusCode.NotFound);
@@ -135,6 +162,28 @@ public sealed class InvestorService(
         if (project.Status != ProjectStatus.Published)
         {
             throw new ApiException("Investor interest can only be sent for published projects", HttpStatusCode.BadRequest);
+        }
+
+        var canAccessProject = await dbContext.ProjectVisibilitySettings.AnyAsync(
+            setting => setting.ProjectId == projectId &&
+                (setting.Visibility == ProjectVisibility.Public ||
+                 setting.Visibility == ProjectVisibility.Limited ||
+                 setting.Visibility == ProjectVisibility.NdaRequired ||
+                 setting.Visibility == ProjectVisibility.InvestorOnly),
+            cancellationToken);
+
+        if (!canAccessProject)
+        {
+            canAccessProject = await dbContext.ProjectAccessGrants.AnyAsync(
+                grant => grant.ProjectId == projectId &&
+                    grant.UserId == userId &&
+                    (grant.ExpiresAt == null || grant.ExpiresAt > DateTimeOffset.UtcNow),
+                cancellationToken);
+        }
+
+        if (!canAccessProject)
+        {
+            throw new ApiException("You do not have permission to access this project", HttpStatusCode.Forbidden);
         }
 
         if (project.OwnerUserId == userId)
@@ -160,12 +209,36 @@ public sealed class InvestorService(
         };
 
         dbContext.InvestorProjectInterests.Add(interest);
-        AddNotification(project.OwnerUserId, "New investor interest", $"An investor is interested in {project.Title}.", interest.Id, "InvestorProjectInterest");
+        var notification = await systemSettingReader.GetBooleanAsync("Notifications.Enabled", true, cancellationToken)
+            ? AddNotification(
+                project.OwnerUserId,
+                "New investor interest",
+                $"An investor is interested in {project.Title}.",
+                interest.Id,
+                "InvestorProjectInterest",
+                $"/projects/{projectId}")
+            : null;
         AddAudit(userId, "InvestorInterest.Create", "InvestorProjectInterest", interest.Id, null);
         AddActivity(projectId, userId, ActivityType.InvestorInterestReceived, ActivityVisibility.MembersOnly, "Investor interest received", "A new investor interest was received.", "InvestorProjectInterest", interest.Id);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (
+            exception.InnerException is PostgresException
+            {
+                SqlState: PostgresErrorCodes.UniqueViolation,
+                ConstraintName: "IX_investor_project_interests_ProjectId_InvestorUserId"
+            })
+        {
+            throw new ApiException("Investor interest already exists for this project", HttpStatusCode.Conflict);
+        }
 
         var result = await GetInterestDtoAsync(interest.Id, cancellationToken);
+        if (notification is not null)
+        {
+            await realtimeNotifier.NotificationCreatedAsync(project.OwnerUserId, notification.ToDto(), cancellationToken);
+        }
         await realtimeNotifier.InvestorInterestChangedAsync(projectId, userId, result, cancellationToken);
         return result;
     }
@@ -176,6 +249,7 @@ public sealed class InvestorService(
         return await QueryInterests()
             .Where(interest => interest.InvestorUserId == userId)
             .OrderByDescending(interest => interest.CreatedAt)
+            .Take(200)
             .Select(interest => MapInterest(interest))
             .ToArrayAsync(cancellationToken);
     }
@@ -188,6 +262,7 @@ public sealed class InvestorService(
         return await QueryInterests()
             .Where(interest => interest.ProjectId == projectId)
             .OrderByDescending(interest => interest.CreatedAt)
+            .Take(200)
             .Select(interest => MapInterest(interest))
             .ToArrayAsync(cancellationToken);
     }
@@ -210,6 +285,7 @@ public sealed class InvestorService(
     public async Task<InvestorInterestDto> WithdrawInterestAsync(ClaimsPrincipal principal, Guid projectId, Guid interestId, CancellationToken cancellationToken)
     {
         var userId = GetUserId(principal);
+        await using var transaction = await BeginInterestTransitionAsync(interestId, cancellationToken);
         var interest = await dbContext.InvestorProjectInterests.FirstOrDefaultAsync(
             item => item.Id == interestId && item.ProjectId == projectId,
             cancellationToken)
@@ -231,6 +307,7 @@ public sealed class InvestorService(
         await dbContext.SaveChangesAsync(cancellationToken);
 
         var result = await GetInterestDtoAsync(interest.Id, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         await realtimeNotifier.InvestorInterestChangedAsync(projectId, interest.InvestorUserId, result, cancellationToken);
         return result;
     }
@@ -246,6 +323,7 @@ public sealed class InvestorService(
     {
         var userId = GetUserId(principal);
         await EnsureCanManageProjectAsync(projectId, userId, cancellationToken);
+        await using var transaction = await BeginInterestTransitionAsync(interestId, cancellationToken);
 
         var interest = await dbContext.InvestorProjectInterests
             .Include(item => item.Project)
@@ -265,6 +343,7 @@ public sealed class InvestorService(
         }
 
         interest.Status = nextStatus;
+        ValidateMaximumLength(request.Response, 1000, "response");
         interest.FounderResponse = TrimOrNull(request.Response);
         interest.DecidedAt = DateTimeOffset.UtcNow;
         interest.UpdatedAt = DateTimeOffset.UtcNow;
@@ -286,13 +365,46 @@ public sealed class InvestorService(
             }
         }
 
-        AddNotification(interest.InvestorUserId, "Investor interest updated", $"Your investor interest status is now {nextStatus}.", interest.Id, "InvestorProjectInterest");
+        var notification = await systemSettingReader.GetBooleanAsync("Notifications.Enabled", true, cancellationToken)
+            ? AddNotification(
+                interest.InvestorUserId,
+                "Investor interest updated",
+                $"Your investor interest status is now {nextStatus}.",
+                interest.Id,
+                "InvestorProjectInterest",
+                "/investor")
+            : null;
         AddAudit(userId, $"InvestorInterest.{nextStatus}", "InvestorProjectInterest", interest.Id, request.Response);
         await dbContext.SaveChangesAsync(cancellationToken);
 
         var result = await GetInterestDtoAsync(interest.Id, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        if (notification is not null)
+        {
+            await realtimeNotifier.NotificationCreatedAsync(interest.InvestorUserId, notification.ToDto(), cancellationToken);
+        }
         await realtimeNotifier.InvestorInterestChangedAsync(projectId, interest.InvestorUserId, result, cancellationToken);
         return result;
+    }
+
+    private async Task<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction> BeginInterestTransitionAsync(
+        Guid interestId,
+        CancellationToken cancellationToken)
+    {
+        var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var lockResource = $"investor-interest-transition:{interestId:N}";
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({lockResource}, 0))",
+                cancellationToken);
+            return transaction;
+        }
+        catch
+        {
+            await transaction.DisposeAsync();
+            throw;
+        }
     }
 
     private IQueryable<InvestorProjectInterest> QueryInterests()
@@ -365,17 +477,20 @@ public sealed class InvestorService(
         }
     }
 
-    private void AddNotification(Guid userId, string title, string message, Guid resourceId, string resourceType)
+    private Notification AddNotification(Guid userId, string title, string message, Guid resourceId, string resourceType, string actionUrl)
     {
-        dbContext.Notifications.Add(new Notification
+        var notification = new Notification
         {
             UserId = userId,
-            Type = NotificationType.System,
+            Type = NotificationType.InvestorInterest,
             Title = title,
             Message = message,
             ResourceId = resourceId,
-            ResourceType = resourceType
-        });
+            ResourceType = resourceType,
+            ActionUrl = actionUrl
+        };
+        dbContext.Notifications.Add(notification);
+        return notification;
     }
 
     private void AddAudit(Guid actorUserId, string action, string resourceType, Guid resourceId, string? reason)
@@ -408,6 +523,20 @@ public sealed class InvestorService(
     private static void ValidateProfile(UpsertInvestorProfileRequest request)
     {
         ValidateRequired(request.DisplayName, "displayName", "Display name is required");
+        ValidateMaximumLength(request.DisplayName, 160, "displayName");
+        ValidateMaximumLength(request.OrganizationName, 180, "organizationName");
+        ValidateMaximumLength(request.Bio, 2000, "bio");
+        ValidateMaximumLength(request.InvestmentFocus, 1000, "investmentFocus");
+        ValidateMaximumLength(request.WebsiteUrl, 500, "websiteUrl");
+        ValidateMaximumLength(request.LinkedInUrl, 500, "linkedInUrl");
+        ValidateOptionalUrl(request.WebsiteUrl, "websiteUrl");
+        ValidateOptionalUrl(request.LinkedInUrl, "linkedInUrl");
+
+        const decimal maximumTicketSize = 9_999_999_999_999_999.99m;
+        if (request.MinTicketSize is < 0 or > maximumTicketSize || request.MaxTicketSize is < 0 or > maximumTicketSize)
+        {
+            throw new ValidationException([new ErrorDetail("InvalidTicketSize", "Ticket size must be between 0 and 9999999999999999.99", "minTicketSize")]);
+        }
 
         if (request.MinTicketSize is not null && request.MaxTicketSize is not null && request.MinTicketSize > request.MaxTicketSize)
         {
@@ -420,6 +549,23 @@ public sealed class InvestorService(
         if (string.IsNullOrWhiteSpace(value))
         {
             throw new ValidationException([new ErrorDetail("Required", message, field)]);
+        }
+    }
+
+    private static void ValidateMaximumLength(string? value, int maximum, string field)
+    {
+        if (!string.IsNullOrWhiteSpace(value) && value.Trim().Length > maximum)
+        {
+            throw new ValidationException([new ErrorDetail("TooLong", $"{field} must be at most {maximum} characters", field)]);
+        }
+    }
+
+    private static void ValidateOptionalUrl(string? value, string field)
+    {
+        if (!string.IsNullOrWhiteSpace(value) &&
+            (!Uri.TryCreate(value.Trim(), UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")))
+        {
+            throw new ValidationException([new ErrorDetail("InvalidUrl", $"{field} must be an absolute HTTP/HTTPS URL", field)]);
         }
     }
 

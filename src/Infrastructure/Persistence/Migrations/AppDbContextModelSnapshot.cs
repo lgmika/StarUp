@@ -103,6 +103,9 @@ namespace StartupConnect.Infrastructure.Persistence.Migrations
                     b.Property<int>("RequestType")
                         .HasColumnType("integer");
 
+                    b.Property<string>("ResponseSnapshot")
+                        .HasColumnType("text");
+
                     b.Property<DateTimeOffset?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -454,10 +457,10 @@ namespace StartupConnect.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("UserId");
-
                     b.HasIndex("ConversationId", "UserId")
                         .IsUnique();
+
+                    b.HasIndex("UserId", "ConversationId");
 
                     b.ToTable("conversation_participants", (string)null);
                 });
@@ -511,6 +514,65 @@ namespace StartupConnect.Infrastructure.Persistence.Migrations
                     b.HasIndex("UserId", "IsDefault");
 
                     b.ToTable("cvs", (string)null);
+                });
+
+            modelBuilder.Entity("StartupConnect.Domain.Entities.EmailOutboxMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<Guid?>("LeaseId")
+                        .IsConcurrencyToken()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("LockedUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ProtectedPayload")
+                        .IsRequired()
+                        .HasMaxLength(12000)
+                        .HasColumnType("character varying(12000)");
+
+                    b.Property<string>("Recipient")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTimeOffset?>("SentAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Template")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("SentAt", "NextAttemptAt", "LockedUntil");
+
+                    b.ToTable("email_outbox_messages", (string)null);
                 });
 
             modelBuilder.Entity("StartupConnect.Domain.Entities.EmailVerificationToken", b =>
@@ -747,9 +809,9 @@ namespace StartupConnect.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("SenderUserId");
-
                     b.HasIndex("ConversationId", "CreatedAt");
+
+                    b.HasIndex("SenderUserId", "CreatedAt");
 
                     b.ToTable("messages", (string)null);
                 });
@@ -1721,6 +1783,48 @@ namespace StartupConnect.Infrastructure.Persistence.Migrations
                     b.ToTable("project_versions", (string)null);
                 });
 
+            modelBuilder.Entity("StartupConnect.Domain.Entities.ProjectView", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateOnly>("ViewedOn")
+                        .HasColumnType("date");
+
+                    b.Property<Guid?>("ViewerUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("VisitorId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ViewerUserId");
+
+                    b.HasIndex("ProjectId", "CreatedAt");
+
+                    b.HasIndex("ProjectId", "ViewerUserId", "ViewedOn")
+                        .IsUnique();
+
+                    b.HasIndex("ProjectId", "VisitorId", "ViewedOn")
+                        .IsUnique();
+
+                    b.ToTable("project_views", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_project_views_viewer", "(\"ViewerUserId\" IS NOT NULL AND \"VisitorId\" IS NULL) OR (\"ViewerUserId\" IS NULL AND \"VisitorId\" IS NOT NULL)");
+                        });
+                });
+
             modelBuilder.Entity("StartupConnect.Domain.Entities.ProjectVisibilitySetting", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1811,6 +1915,7 @@ namespace StartupConnect.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(128)");
 
                     b.Property<DateTimeOffset?>("RevokedAt")
+                        .IsConcurrencyToken()
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RevokedByIp")
@@ -2847,6 +2952,16 @@ namespace StartupConnect.Infrastructure.Persistence.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("StartupConnect.Domain.Entities.EmailOutboxMessage", b =>
+                {
+                    b.HasOne("StartupConnect.Domain.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("StartupConnect.Domain.Entities.EmailVerificationToken", b =>
                 {
                     b.HasOne("StartupConnect.Domain.Entities.User", "User")
@@ -3309,6 +3424,24 @@ namespace StartupConnect.Infrastructure.Persistence.Migrations
                     b.Navigation("ChangedByUser");
 
                     b.Navigation("Project");
+                });
+
+            modelBuilder.Entity("StartupConnect.Domain.Entities.ProjectView", b =>
+                {
+                    b.HasOne("StartupConnect.Domain.Entities.Project", "Project")
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("StartupConnect.Domain.Entities.User", "ViewerUser")
+                        .WithMany()
+                        .HasForeignKey("ViewerUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("Project");
+
+                    b.Navigation("ViewerUser");
                 });
 
             modelBuilder.Entity("StartupConnect.Domain.Entities.ProjectVisibilitySetting", b =>

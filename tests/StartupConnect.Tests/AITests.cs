@@ -1,4 +1,5 @@
 using StartupConnect.Application.AI.Dtos;
+using StartupConnect.Domain.Entities;
 using StartupConnect.Infrastructure.AI;
 
 namespace StartupConnect.Tests;
@@ -44,5 +45,17 @@ public sealed class AIDtoTests
         Assert.Equal(3, suggestions.Count);
         Assert.InRange(review.QualityScore, 0, 100);
         Assert.NotEmpty(review.MissingInformation);
+    }
+
+    [Fact]
+    public void AIRequest_Should_Persist_Generated_Response()
+    {
+        var request = new AIRequest
+        {
+            PromptSnapshot = "Project snapshot",
+            ResponseSnapshot = "Generated investor summary"
+        };
+
+        Assert.Equal("Generated investor summary", request.ResponseSnapshot);
     }
 }

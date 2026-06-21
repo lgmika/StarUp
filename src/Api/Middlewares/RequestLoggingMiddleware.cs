@@ -54,9 +54,21 @@ public sealed class RequestLoggingMiddleware(
         if (context.Request.Headers.TryGetValue(options.CorrelationHeaderName, out var values) &&
             !string.IsNullOrWhiteSpace(values.FirstOrDefault()))
         {
-            return values.First()!;
+            return NormalizeCorrelationId(values.First(), context.TraceIdentifier);
         }
 
         return context.TraceIdentifier;
+    }
+
+    public static string NormalizeCorrelationId(string? value, string fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 128)
+        {
+            return fallback;
+        }
+
+        return value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.')
+            ? value
+            : fallback;
     }
 }

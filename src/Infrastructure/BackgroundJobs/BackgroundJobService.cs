@@ -8,6 +8,7 @@ using StartupConnect.Application.Files.Interfaces;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
 using StartupConnect.Infrastructure.Persistence;
+using StartupConnect.Infrastructure.Email;
 
 namespace StartupConnect.Infrastructure.BackgroundJobs;
 
@@ -15,9 +16,11 @@ public sealed class BackgroundJobService(
     AppDbContext dbContext,
     IFileStorageService fileStorageService,
     IOptions<BackgroundJobOptions> optionsAccessor,
+    IOptions<EmailOutboxOptions> emailOutboxOptionsAccessor,
     ILogger<BackgroundJobService> logger) : IBackgroundJobService
 {
     private readonly BackgroundJobOptions options = optionsAccessor.Value;
+    private readonly EmailOutboxOptions emailOutboxOptions = emailOutboxOptionsAccessor.Value;
 
     public async Task<BackgroundJobRunResult> RunMaintenanceAsync(CancellationToken cancellationToken)
     {
@@ -41,11 +44,12 @@ public sealed class BackgroundJobService(
         {
             var executions = new List<BackgroundJobExecution>
             {
+                await RunWithRetryAsync("CleanupBackgroundJobExecutions", CleanupBackgroundJobExecutionsAsync, cancellationToken),
                 await RunWithRetryAsync("CleanupExpiredTokens", CleanupExpiredTokensAsync, cancellationToken),
+                await RunWithRetryAsync("CleanupEmailOutbox", CleanupEmailOutboxAsync, cancellationToken),
                 await RunWithRetryAsync("ExpireProjectInvitations", ExpireProjectInvitationsAsync, cancellationToken),
                 await RunWithRetryAsync("CleanupOrphanFiles", CleanupOrphanFilesAsync, cancellationToken),
-                await RunWithRetryAsync("ExpireSubscriptions", ExpireSubscriptionsAsync, cancellationToken),
-                await RunWithRetryAsync("GenerateAnalyticsAggregate", GenerateAnalyticsAggregateAsync, cancellationToken)
+                await RunWithRetryAsync("ExpireSubscriptions", ExpireSubscriptionsAsync, cancellationToken)
             };
 
             return new BackgroundJobRunResult(true, executions.Select(Map).ToList());
@@ -127,6 +131,7 @@ public sealed class BackgroundJobService(
     private async Task<int> CleanupExpiredTokensAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
         var staleUsedBefore = now.AddDays(-7);
+        var refreshTokenCutoff = now.AddDays(-options.RefreshTokenRetentionDays);
 
         var emailTokens = await dbContext.EmailVerificationTokens
             .Where(token => token.ExpiresAt <= now || (token.UsedAt != null && token.UsedAt <= staleUsedBefore))
@@ -141,13 +146,22 @@ public sealed class BackgroundJobService(
             .ToListAsync(cancellationToken);
 
         var refreshTokens = await dbContext.RefreshTokens
-            .Where(token => token.RevokedAt == null && token.ExpiresAt <= now)
+            .Where(token => token.RevokedAt == null && token.ExpiresAt <= now && token.ExpiresAt > refreshTokenCutoff)
+            .OrderBy(token => token.ExpiresAt)
+            .Take(options.BatchSize)
+            .ToListAsync(cancellationToken);
+
+        var staleRefreshTokens = await dbContext.RefreshTokens
+            .Where(token =>
+                token.ExpiresAt <= refreshTokenCutoff ||
+                (token.RevokedAt != null && token.RevokedAt <= refreshTokenCutoff))
             .OrderBy(token => token.ExpiresAt)
             .Take(options.BatchSize)
             .ToListAsync(cancellationToken);
 
         dbContext.EmailVerificationTokens.RemoveRange(emailTokens);
         dbContext.PasswordResetTokens.RemoveRange(resetTokens);
+        dbContext.RefreshTokens.RemoveRange(staleRefreshTokens);
 
         foreach (var token in refreshTokens)
         {
@@ -156,7 +170,21 @@ public sealed class BackgroundJobService(
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
-        return emailTokens.Count + resetTokens.Count + refreshTokens.Count;
+        return emailTokens.Count + resetTokens.Count + refreshTokens.Count + staleRefreshTokens.Count;
+    }
+
+    private async Task<int> CleanupBackgroundJobExecutionsAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var cutoff = now.AddDays(-options.ExecutionRetentionDays);
+        var executions = await dbContext.BackgroundJobExecutions
+            .Where(execution => execution.FinishedAt <= cutoff)
+            .OrderBy(execution => execution.FinishedAt)
+            .Take(options.BatchSize)
+            .ToListAsync(cancellationToken);
+
+        dbContext.BackgroundJobExecutions.RemoveRange(executions);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return executions.Count;
     }
 
     private async Task<int> ExpireProjectInvitationsAsync(DateTimeOffset now, CancellationToken cancellationToken)
@@ -177,6 +205,25 @@ public sealed class BackgroundJobService(
         return invitations.Count;
     }
 
+    private async Task<int> CleanupEmailOutboxAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var sentCutoff = now.AddDays(-options.EmailOutboxRetentionDays);
+        var failedCutoff = now.AddDays(-options.FailedEmailOutboxRetentionDays);
+        var messages = await dbContext.EmailOutboxMessages
+            .Where(message =>
+                (message.SentAt != null && message.SentAt <= sentCutoff) ||
+                (message.SentAt == null &&
+                 message.Attempts >= emailOutboxOptions.MaxAttempts &&
+                 (message.UpdatedAt ?? message.CreatedAt) <= failedCutoff))
+            .OrderBy(message => message.CreatedAt)
+            .Take(options.BatchSize)
+            .ToListAsync(cancellationToken);
+
+        dbContext.EmailOutboxMessages.RemoveRange(messages);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return messages.Count;
+    }
+
     private async Task<int> CleanupOrphanFilesAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
         var cutoff = now.AddDays(-1);
@@ -193,12 +240,17 @@ public sealed class BackgroundJobService(
 
         foreach (var file in files)
         {
-            await fileStorageService.DeleteAsync(file.StoragePath, cancellationToken);
             file.IsDeleted = true;
             file.UpdatedAt = now;
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+
+        foreach (var file in files)
+        {
+            await fileStorageService.DeleteAsync(file.StoragePath, cancellationToken);
+        }
+
         return files.Count;
     }
 
@@ -218,11 +270,6 @@ public sealed class BackgroundJobService(
 
         await dbContext.SaveChangesAsync(cancellationToken);
         return subscriptions.Count;
-    }
-
-    private Task<int> GenerateAnalyticsAggregateAsync(DateTimeOffset now, CancellationToken cancellationToken)
-    {
-        return Task.FromResult(0);
     }
 
     private async Task<BackgroundJobExecution> RecordExecutionAsync(

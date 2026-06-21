@@ -19,13 +19,53 @@ public sealed class GlobalExceptionMiddleware(
         }
         catch (ApiException exception)
         {
+            if (context.Response.HasStarted)
+            {
+                throw;
+            }
+
             await WriteErrorAsync(context, exception.StatusCode, exception.Message, exception.Errors);
+        }
+        catch (BadHttpRequestException)
+        {
+            if (context.Response.HasStarted)
+            {
+                throw;
+            }
+
+            await WriteErrorAsync(
+                context,
+                HttpStatusCode.BadRequest,
+                "Invalid request",
+                [new ErrorDetail("InvalidRequest", "The request body or parameters are invalid", null)]);
+        }
+        catch (JsonException)
+        {
+            if (context.Response.HasStarted)
+            {
+                throw;
+            }
+
+            await WriteErrorAsync(
+                context,
+                HttpStatusCode.BadRequest,
+                "Invalid JSON payload",
+                [new ErrorDetail("InvalidJson", "The request body contains invalid JSON", null)]);
+        }
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        {
+            logger.LogDebug("Request was cancelled by the client: {Method} {Path}", context.Request.Method, context.Request.Path);
         }
         catch (Exception exception)
         {
             logger.LogError(exception, "Unhandled exception while processing request {Method} {Path}",
                 context.Request.Method,
                 context.Request.Path);
+
+            if (context.Response.HasStarted)
+            {
+                throw;
+            }
 
             await WriteErrorAsync(
                 context,
@@ -41,11 +81,6 @@ public sealed class GlobalExceptionMiddleware(
         string message,
         IReadOnlyCollection<ErrorDetail> errors)
     {
-        if (context.Response.HasStarted)
-        {
-            return;
-        }
-
         context.Response.Clear();
         context.Response.StatusCode = (int)statusCode;
         context.Response.ContentType = "application/json";
@@ -54,4 +89,3 @@ public sealed class GlobalExceptionMiddleware(
         await JsonSerializer.SerializeAsync(context.Response.Body, response, JsonOptions);
     }
 }
-

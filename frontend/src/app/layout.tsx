@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { Toaster } from "sonner";
+import { AppProviders } from "@/components/providers/app-providers";
 import "./globals.css";
 
 const inter = Inter({
@@ -34,13 +35,10 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={`${inter.variable} overflow-x-hidden font-sans antialiased`}>
-        {children}
-        <Toaster
-          position="top-right"
-          richColors
-          closeButton
-          duration={4000}
-        />
+        <AppProviders>
+          {children}
+          <Toaster position="top-right" richColors closeButton duration={4000} />
+        </AppProviders>
       </body>
     </html>
   );

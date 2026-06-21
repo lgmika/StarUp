@@ -276,7 +276,7 @@ public sealed class RecommendationService(AppDbContext dbContext) : IRecommendat
     private static RecommendationListResponse<T> Page<T>(IReadOnlyCollection<T> items, int page, int pageSize)
     {
         var total = items.Count;
-        var pageItems = items.Skip((page - 1) * pageSize).Take(pageSize).ToArray();
+        var pageItems = items.Skip(Pagination.GetOffset(page, pageSize)).Take(pageSize).ToArray();
         return new RecommendationListResponse<T>(pageItems, total, page, pageSize);
     }
 

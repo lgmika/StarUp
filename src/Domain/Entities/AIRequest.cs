@@ -16,8 +16,9 @@ public sealed class AIRequest : BaseEntity
 
     public string PromptSnapshot { get; set; } = string.Empty;
 
+    public string? ResponseSnapshot { get; set; }
+
     public string Provider { get; set; } = "Mock";
 
     public bool IsSuccessful { get; set; } = true;
 }
-

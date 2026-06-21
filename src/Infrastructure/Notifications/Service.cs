@@ -3,6 +3,7 @@ using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
 using StartupConnect.Application.Notifications.Dtos;
 using StartupConnect.Application.Notifications.Interfaces;
+using StartupConnect.Application.Admin.Interfaces;
 using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Infrastructure.Persistence;
@@ -13,7 +14,8 @@ namespace StartupConnect.Infrastructure.Notifications;
 
 public sealed class NotificationService(
     AppDbContext dbContext,
-    IRealtimeNotifier realtimeNotifier) : INotificationService
+    IRealtimeNotifier realtimeNotifier,
+    ISystemSettingReader systemSettingReader) : INotificationService
 {
     private const int MaxPageSize = 100;
 
@@ -37,7 +39,7 @@ public sealed class NotificationService(
 
         var items = await notifications
             .OrderByDescending(item => item.CreatedAt)
-            .Skip((page - 1) * pageSize)
+            .Skip(Pagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .Select(item => Map(item))
             .ToArrayAsync(cancellationToken);
@@ -78,23 +80,18 @@ public sealed class NotificationService(
     {
         var userId = GetUserId(principal);
         var now = DateTimeOffset.UtcNow;
-        var unread = await dbContext.Notifications
+        var updatedCount = await dbContext.Notifications
             .Where(item => item.UserId == userId && !item.IsDeleted && item.ReadAt == null)
-            .ToArrayAsync(cancellationToken);
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.ReadAt, now)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
 
-        foreach (var notification in unread)
-        {
-            notification.ReadAt = now;
-            notification.UpdatedAt = now;
-        }
-
-        await dbContext.SaveChangesAsync(cancellationToken);
-        if (unread.Length > 0)
+        if (updatedCount > 0)
         {
             await realtimeNotifier.NotificationsReadAllAsync(userId, cancellationToken);
         }
 
-        return unread.Length;
+        return updatedCount;
     }
 
     public async Task DeleteAsync(
@@ -115,6 +112,21 @@ public sealed class NotificationService(
         CancellationToken cancellationToken)
     {
         ValidateCreate(request);
+
+        if (!await systemSettingReader.GetBooleanAsync("Notifications.Enabled", true, cancellationToken))
+        {
+            return new NotificationDto(
+                Guid.Empty,
+                request.Type,
+                request.Title.Trim(),
+                request.Message.Trim(),
+                request.ResourceType?.Trim(),
+                request.ResourceId,
+                request.ActionUrl?.Trim(),
+                false,
+                null,
+                DateTimeOffset.UtcNow);
+        }
 
         var duplicateExists = request.ResourceId.HasValue && await dbContext.Notifications.AnyAsync(
             item => item.UserId == request.UserId &&

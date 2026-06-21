@@ -5,6 +5,7 @@ export { activityService } from "./activity-service";
 export { backgroundJobService } from "./background-job-service";
 export { chatService } from "./chat-service";
 export { dashboardService } from "./dashboard-service";
+export { fileService } from "./file-service";
 export { interviewService } from "./interview-service";
 export { investorService } from "./investor-service";
 export { moderatorService } from "./moderator-service";

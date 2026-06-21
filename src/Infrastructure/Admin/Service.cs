@@ -2,6 +2,8 @@ using System.Net;
 using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
+using Npgsql;
 using StartupConnect.Application.Admin.Dtos;
 using StartupConnect.Application.Admin.Interfaces;
 using StartupConnect.Application.Realtime.Interfaces;
@@ -9,6 +11,7 @@ using StartupConnect.Domain.Constants;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
 using StartupConnect.Infrastructure.Persistence;
+using StartupConnect.Infrastructure.Email;
 using StartupConnect.Shared.Exceptions;
 using StartupConnect.Shared.Responses;
 
@@ -17,9 +20,11 @@ namespace StartupConnect.Infrastructure.Admin;
 public sealed class AdminService(
     AppDbContext dbContext,
     IConfiguration configuration,
-    IRealtimeNotifier realtimeNotifier) : IAdminService
+    IRealtimeNotifier realtimeNotifier,
+    IOptions<EmailOutboxOptions> emailOutboxOptionsAccessor) : IAdminService
 {
     private const int MaxPageSize = 100;
+    private readonly EmailOutboxOptions emailOutboxOptions = emailOutboxOptionsAccessor.Value;
 
     public async Task<AdminDashboardDto> GetDashboardAsync(CancellationToken cancellationToken)
     {
@@ -70,7 +75,7 @@ public sealed class AdminService(
         var total = await users.CountAsync(cancellationToken);
         var items = await users
             .OrderByDescending(user => user.CreatedAt)
-            .Skip((page - 1) * pageSize)
+            .Skip(Pagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .Select(user => MapUser(user))
             .ToArrayAsync(cancellationToken);
@@ -226,7 +231,7 @@ public sealed class AdminService(
         var total = await dbContext.AuditLogs.CountAsync(cancellationToken);
         var items = await dbContext.AuditLogs
             .OrderByDescending(log => log.CreatedAt)
-            .Skip((page - 1) * pageSize)
+            .Skip(Pagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .Select(log => new AdminAuditLogDto(
                 log.Id,
@@ -332,7 +337,7 @@ public sealed class AdminService(
         var total = await projects.CountAsync(cancellationToken);
         var items = await projects
             .OrderByDescending(item => item.Project.CreatedAt)
-            .Skip((page - 1) * pageSize)
+            .Skip(Pagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .Select(item => MapProject(item.Project, item.Setting))
             .ToArrayAsync(cancellationToken);
@@ -527,6 +532,111 @@ public sealed class AdminService(
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task<AdminEmailOutboxListResponse> GetEmailOutboxAsync(
+        AdminEmailOutboxQuery query,
+        CancellationToken cancellationToken)
+    {
+        var page = Math.Max(query.Page, 1);
+        var pageSize = Math.Clamp(query.PageSize, 1, MaxPageSize);
+        var now = DateTimeOffset.UtcNow;
+        var messages = dbContext.EmailOutboxMessages.AsNoTracking();
+
+        if (!string.IsNullOrWhiteSpace(query.Recipient))
+        {
+            var recipient = query.Recipient.Trim();
+            messages = messages.Where(message => EF.Functions.ILike(message.Recipient, $"%{recipient}%"));
+        }
+
+        if (!string.IsNullOrWhiteSpace(query.Status))
+        {
+            messages = query.Status.Trim().ToLowerInvariant() switch
+            {
+                "sent" => messages.Where(message => message.SentAt != null),
+                "failed" => messages.Where(message => message.SentAt == null && message.Attempts >= emailOutboxOptions.MaxAttempts),
+                "processing" => messages.Where(message => message.SentAt == null && message.LeaseId != null && message.LockedUntil > now),
+                "pending" => messages.Where(message =>
+                    message.SentAt == null &&
+                    message.Attempts < emailOutboxOptions.MaxAttempts &&
+                    (message.LeaseId == null || message.LockedUntil == null || message.LockedUntil <= now)),
+                _ => throw new ValidationException([new ErrorDetail("InvalidStatus", "Status must be pending, processing, failed, or sent", "status")])
+            };
+        }
+
+        var total = await messages.CountAsync(cancellationToken);
+        var items = await messages
+            .OrderByDescending(message => message.CreatedAt)
+            .Skip(Pagination.GetOffset(page, pageSize))
+            .Take(pageSize)
+            .ToArrayAsync(cancellationToken);
+
+        return new AdminEmailOutboxListResponse(
+            items.Select(message => MapEmailOutbox(message, now)).ToArray(),
+            total,
+            page,
+            pageSize);
+    }
+
+    public async Task<AdminEmailOutboxDto> RetryEmailAsync(
+        ClaimsPrincipal principal,
+        Guid messageId,
+        AdminRetryEmailRequest request,
+        CancellationToken cancellationToken)
+    {
+        var actorUserId = GetUserId(principal);
+        var message = await dbContext.EmailOutboxMessages.FirstOrDefaultAsync(item => item.Id == messageId, cancellationToken)
+            ?? throw new ApiException("Email outbox message not found", HttpStatusCode.NotFound);
+
+        if (message.SentAt is not null)
+        {
+            throw new ApiException("A sent email cannot be retried", HttpStatusCode.Conflict);
+        }
+
+        if (message.LeaseId is not null && message.LockedUntil > DateTimeOffset.UtcNow)
+        {
+            throw new ApiException("Email is currently being processed", HttpStatusCode.Conflict);
+        }
+
+        message.Attempts = 0;
+        message.NextAttemptAt = DateTimeOffset.UtcNow;
+        message.LeaseId = null;
+        message.LockedUntil = null;
+        message.LastError = null;
+        message.UpdatedAt = DateTimeOffset.UtcNow;
+        AddAudit(actorUserId, "Admin.EmailOutbox.Retry", "EmailOutboxMessage", message.Id, request.Reason ?? message.Template);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new ApiException("Email processing state changed; reload and retry", HttpStatusCode.Conflict);
+        }
+
+        return MapEmailOutbox(message, DateTimeOffset.UtcNow);
+    }
+
+    private string GetEmailOutboxStatus(EmailOutboxMessage message, DateTimeOffset now)
+    {
+        if (message.SentAt is not null) return "sent";
+        if (message.LeaseId is not null && message.LockedUntil > now) return "processing";
+        return message.Attempts >= emailOutboxOptions.MaxAttempts ? "failed" : "pending";
+    }
+
+    private AdminEmailOutboxDto MapEmailOutbox(EmailOutboxMessage message, DateTimeOffset now)
+    {
+        return new AdminEmailOutboxDto(
+            message.Id,
+            message.Recipient,
+            message.Template,
+            GetEmailOutboxStatus(message, now),
+            message.Attempts,
+            message.NextAttemptAt,
+            message.LockedUntil,
+            message.SentAt,
+            message.LastError,
+            message.CreatedAt);
+    }
+
     private async Task<User> GetUserWithRolesAsync(Guid userId, CancellationToken cancellationToken)
     {
         return await dbContext.Users
@@ -577,11 +687,14 @@ public sealed class AdminService(
 
     private async Task EnsureDefaultSettingsAsync(CancellationToken cancellationToken)
     {
-        var existingKeys = await dbContext.SystemSettings.Select(setting => setting.Key).ToArrayAsync(cancellationToken);
+        var existingSettings = await dbContext.SystemSettings.ToDictionaryAsync(setting => setting.Key, cancellationToken);
         foreach (var definition in GetDefaultSettings())
         {
-            if (existingKeys.Contains(definition.Key))
+            if (existingSettings.TryGetValue(definition.Key, out var existing))
             {
+                existing.Group = definition.Group;
+                existing.Type = definition.Type;
+                existing.IsReadonly = definition.IsReadonly;
                 continue;
             }
 
@@ -595,7 +708,19 @@ public sealed class AdminService(
             });
         }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (exception.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.UniqueViolation,
+            ConstraintName: "IX_system_settings_Key"
+        })
+        {
+            // Another API instance seeded the same defaults concurrently.
+            dbContext.ChangeTracker.Clear();
+        }
     }
 
     private IReadOnlyCollection<SystemSetting> GetDefaultSettings()
@@ -605,7 +730,7 @@ public sealed class AdminService(
             new SystemSetting { Key = "AI.DailyQuota", Group = "AI", Value = configuration["AI:DailyQuota"] ?? "20", Type = "number" },
             new SystemSetting { Key = "FileStorage.MaxCvBytes", Group = "FileStorage", Value = configuration["FileStorage:MaxCvBytes"] ?? "5242880", Type = "number" },
             new SystemSetting { Key = "Realtime.Enabled", Group = "Realtime", Value = "true", Type = "boolean" },
-            new SystemSetting { Key = "Moderation.Policy", Group = "Moderation", Value = "manual_review_required", Type = "string" },
+            new SystemSetting { Key = "Moderation.Policy", Group = "Moderation", Value = "manual_review_required", Type = "string", IsReadonly = true },
             new SystemSetting { Key = "Subscriptions.Enabled", Group = "Subscriptions", Value = "true", Type = "boolean" },
             new SystemSetting { Key = "Payments.Provider", Group = "Payments", Value = configuration["Payments:Provider"] ?? "Mock", Type = "string", IsReadonly = true },
             new SystemSetting { Key = "Payments.CheckoutEnabled", Group = "Payments", Value = "true", Type = "boolean" },
@@ -615,7 +740,7 @@ public sealed class AdminService(
         ];
     }
 
-    private static void ValidateSettingValue(SystemSetting setting, string value)
+    private void ValidateSettingValue(SystemSetting setting, string value)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
@@ -630,6 +755,26 @@ public sealed class AdminService(
         if (setting.Type == "boolean" && !bool.TryParse(value, out _))
         {
             throw new ValidationException([new ErrorDetail("InvalidBoolean", "Setting value must be true or false", "value")]);
+        }
+
+        if (value.Trim().Length > 2000)
+        {
+            throw new ValidationException([new ErrorDetail("ValueTooLong", "Setting value must be at most 2000 characters", "value")]);
+        }
+
+        if (setting.Key == "AI.DailyQuota" &&
+            (!int.TryParse(value, out var dailyQuota) || dailyQuota is < 1 or > 10_000))
+        {
+            throw new ValidationException([new ErrorDetail("InvalidQuota", "AI daily quota must be between 1 and 10000", "value")]);
+        }
+
+        var maxRequestBodySize = long.TryParse(configuration["Security:MaxRequestBodySizeBytes"], out var configuredRequestLimit)
+            ? configuredRequestLimit
+            : 25 * 1024 * 1024;
+        if (setting.Key == "FileStorage.MaxCvBytes" &&
+            (!long.TryParse(value, out var maxCvBytes) || maxCvBytes < 4 || maxCvBytes > maxRequestBodySize))
+        {
+            throw new ValidationException([new ErrorDetail("InvalidFileLimit", $"CV upload limit must be between 4 bytes and the request limit of {maxRequestBodySize} bytes", "value")]);
         }
     }
 
@@ -648,9 +793,29 @@ public sealed class AdminService(
             throw new ValidationException([new ErrorDetail("Required", "Plan code is required", "code")]);
         }
 
+        if (request.Code.Trim().Length > 80)
+        {
+            throw new ValidationException([new ErrorDetail("CodeTooLong", "Plan code must be at most 80 characters", "code")]);
+        }
+
         if (string.IsNullOrWhiteSpace(request.Name))
         {
             throw new ValidationException([new ErrorDetail("Required", "Plan name is required", "name")]);
+        }
+
+        if (request.Name.Trim().Length > 160)
+        {
+            throw new ValidationException([new ErrorDetail("NameTooLong", "Plan name must be at most 160 characters", "name")]);
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Description))
+        {
+            throw new ValidationException([new ErrorDetail("Required", "Plan description is required", "description")]);
+        }
+
+        if (request.Description.Trim().Length > 1000)
+        {
+            throw new ValidationException([new ErrorDetail("DescriptionTooLong", "Plan description must be at most 1000 characters", "description")]);
         }
 
         if (string.IsNullOrWhiteSpace(request.Currency) || request.Currency.Trim().Length != 3)
@@ -669,6 +834,11 @@ public sealed class AdminService(
         if (string.IsNullOrWhiteSpace(request.ResourceKey))
         {
             throw new ValidationException([new ErrorDetail("Required", "Resource key is required", "resourceKey")]);
+        }
+
+        if (request.ResourceKey.Trim().Length > 120)
+        {
+            throw new ValidationException([new ErrorDetail("ResourceKeyTooLong", "Resource key must be at most 120 characters", "resourceKey")]);
         }
 
         if (request.Limit < 0)
@@ -734,13 +904,14 @@ public sealed class AdminService(
 
     private void AddAudit(Guid actorUserId, string action, string resourceType, Guid resourceId, string reason)
     {
+        var normalizedReason = reason.Trim();
         dbContext.AuditLogs.Add(new AuditLog
         {
             ActorUserId = actorUserId,
             Action = action,
             ResourceType = resourceType,
             ResourceId = resourceId,
-            Reason = reason.Trim()
+            Reason = normalizedReason[..Math.Min(normalizedReason.Length, 500)]
         });
     }
 
@@ -777,6 +948,11 @@ public sealed class AdminService(
         {
             throw new ValidationException([new ErrorDetail("Required", "Reason is required", "reason")]);
         }
+
+        if (reason.Trim().Length > 500)
+        {
+            throw new ValidationException([new ErrorDetail("ReasonTooLong", "Reason must be at most 500 characters", "reason")]);
+        }
     }
 
     private static void ValidateRoleCode(string roleCode)
@@ -784,6 +960,11 @@ public sealed class AdminService(
         if (string.IsNullOrWhiteSpace(roleCode))
         {
             throw new ValidationException([new ErrorDetail("Required", "Role code is required", "roleCode")]);
+        }
+
+        if (roleCode.Trim().Length > 80)
+        {
+            throw new ValidationException([new ErrorDetail("RoleCodeTooLong", "Role code must be at most 80 characters", "roleCode")]);
         }
     }
 

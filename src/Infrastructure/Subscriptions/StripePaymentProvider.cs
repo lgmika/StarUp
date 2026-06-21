@@ -30,8 +30,8 @@ public sealed class StripePaymentProvider(IOptions<PaymentOptions> optionsAccess
         var session = await service.CreateAsync(new SessionCreateOptions
         {
             Mode = "subscription",
-            SuccessUrl = NormalizeReturnUrl(successUrl, true),
-            CancelUrl = NormalizeReturnUrl(cancelUrl, false),
+            SuccessUrl = PaymentReturnUrlPolicy.Normalize(options.CheckoutBaseUrl, successUrl, true),
+            CancelUrl = PaymentReturnUrlPolicy.Normalize(options.CheckoutBaseUrl, cancelUrl, false),
             ClientReferenceId = userId.ToString("D"),
             Metadata = BuildMetadata(userId, plan),
             SubscriptionData = new SessionSubscriptionDataOptions
@@ -70,6 +70,26 @@ public sealed class StripePaymentProvider(IOptions<PaymentOptions> optionsAccess
         return new PaymentCheckoutSession(session.Id, session.Url);
     }
 
+    public async Task CancelSubscriptionAsync(string? providerSubscriptionId, CancellationToken cancellationToken)
+    {
+        var subscriptionId = RequireSubscriptionId(providerSubscriptionId);
+        var service = new Stripe.SubscriptionService(new StripeClient(options.ApiKey));
+        await service.UpdateAsync(
+            subscriptionId,
+            new SubscriptionUpdateOptions { CancelAtPeriodEnd = true },
+            cancellationToken: cancellationToken);
+    }
+
+    public async Task ResumeSubscriptionAsync(string? providerSubscriptionId, CancellationToken cancellationToken)
+    {
+        var subscriptionId = RequireSubscriptionId(providerSubscriptionId);
+        var service = new Stripe.SubscriptionService(new StripeClient(options.ApiKey));
+        await service.UpdateAsync(
+            subscriptionId,
+            new SubscriptionUpdateOptions { CancelAtPeriodEnd = false },
+            cancellationToken: cancellationToken);
+    }
+
     public bool VerifyWebhookSignature(string payloadJson, string? signature)
     {
         if (string.IsNullOrWhiteSpace(signature) || string.IsNullOrWhiteSpace(options.WebhookSecret))
@@ -105,6 +125,21 @@ public sealed class StripePaymentProvider(IOptions<PaymentOptions> optionsAccess
             "invoice.payment_failed" => BuildInvoiceFailed(eventId, dataObject, metadata),
             _ => new PaymentProviderWebhookPayload(eventId, stripeType, null, null, null, null, null, null, null, null)
         };
+    }
+
+    private string RequireSubscriptionId(string? providerSubscriptionId)
+    {
+        if (string.IsNullOrWhiteSpace(options.ApiKey))
+        {
+            throw new InvalidOperationException("Payments:ApiKey is required when Payments:Provider is Stripe.");
+        }
+
+        if (string.IsNullOrWhiteSpace(providerSubscriptionId))
+        {
+            throw new InvalidOperationException("Stripe subscription id is missing.");
+        }
+
+        return providerSubscriptionId;
     }
 
     private PaymentProviderWebhookPayload BuildCheckoutCompleted(string eventId, JsonElement session, JsonElement? metadata)
@@ -154,22 +189,6 @@ public sealed class StripePaymentProvider(IOptions<PaymentOptions> optionsAccess
             SubscriptionStatus.PastDue,
             null,
             null);
-    }
-
-    private string NormalizeReturnUrl(string? configuredUrl, bool success)
-    {
-        if (!string.IsNullOrWhiteSpace(configuredUrl))
-        {
-            return configuredUrl;
-        }
-
-        if (string.IsNullOrWhiteSpace(options.CheckoutBaseUrl))
-        {
-            throw new InvalidOperationException("Payments:CheckoutBaseUrl is required for Stripe checkout return URLs.");
-        }
-
-        var separator = options.CheckoutBaseUrl.Contains('?', StringComparison.Ordinal) ? '&' : '?';
-        return $"{options.CheckoutBaseUrl}{separator}status={(success ? "success" : "cancelled")}&session_id={{CHECKOUT_SESSION_ID}}";
     }
 
     private static Dictionary<string, string> BuildMetadata(Guid userId, SubscriptionPlan plan)

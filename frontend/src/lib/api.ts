@@ -2,16 +2,17 @@ import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios';
 import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './auth';
 import type { ApiResponse, ErrorResponse } from '@/types/api';
 import type { AuthResponse } from '@/types/auth';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8080/api/v1';
+import { API_BASE_URL } from './config';
 
 declare module 'axios' {
   export interface AxiosRequestConfig {
     skipForbiddenRedirect?: boolean;
+    allowAnonymousFallback?: boolean;
   }
 
   export interface InternalAxiosRequestConfig {
     skipForbiddenRedirect?: boolean;
+    allowAnonymousFallback?: boolean;
   }
 }
 
@@ -22,6 +23,17 @@ const api = axios.create({
   },
   timeout: 30000,
 });
+
+function isPublicAuthRequest(url?: string) {
+  return Boolean(url && [
+    '/auth/login',
+    '/auth/register',
+    '/auth/forgot-password',
+    '/auth/reset-password',
+    '/auth/verify-email',
+    '/auth/refresh-token',
+  ].some((path) => url.includes(path)));
+}
 
 // Track if we're currently refreshing the token
 let isRefreshing = false;
@@ -45,7 +57,7 @@ function processQueue(error: Error | null, token: string | null = null) {
 api.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     const token = getAccessToken();
-    if (token) {
+    if (token && !isPublicAuthRequest(config.url)) {
       config.headers.Authorization = `Bearer ${token}`;
     }
     return config;
@@ -57,9 +69,9 @@ api.interceptors.request.use(
 api.interceptors.response.use(
   (response) => response,
   async (error: AxiosError<ErrorResponse>) => {
-    const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
+    const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean; _anonymousRetry?: boolean };
 
-    if (error.response?.status === 403 && !originalRequest.skipForbiddenRedirect) {
+    if (error.response?.status === 403 && !originalRequest.skipForbiddenRedirect && !isPublicAuthRequest(originalRequest.url)) {
       if (typeof window !== 'undefined' && window.location.pathname !== '/forbidden') {
         window.location.href = '/forbidden';
       }
@@ -68,11 +80,12 @@ api.interceptors.response.use(
 
     // If 401 and we haven't retried yet
     if (error.response?.status === 401 && !originalRequest._retry) {
-      // Don't retry refresh-token or login requests
-      if (
-        originalRequest.url?.includes('/auth/refresh-token') ||
-        originalRequest.url?.includes('/auth/login')
-      ) {
+      // A failed login belongs to the form; redirecting here would erase its error.
+      if (originalRequest.url?.includes('/auth/login')) {
+        return Promise.reject(error);
+      }
+
+      if (originalRequest.url?.includes('/auth/refresh-token')) {
         clearTokens();
         if (typeof window !== 'undefined') {
           window.location.href = '/auth/login';
@@ -97,10 +110,8 @@ api.interceptors.response.use(
 
       const refreshToken = getRefreshToken();
       if (!refreshToken) {
-        clearTokens();
-        if (typeof window !== 'undefined') {
-          window.location.href = '/auth/login';
-        }
+        if (originalRequest.allowAnonymousFallback) return retryAnonymously(originalRequest);
+        clearSessionAndRedirect();
         return Promise.reject(error);
       }
 
@@ -120,10 +131,8 @@ api.interceptors.response.use(
         return api(originalRequest);
       } catch (refreshError) {
         processQueue(refreshError as Error);
-        clearTokens();
-        if (typeof window !== 'undefined') {
-          window.location.href = '/auth/login';
-        }
+        if (originalRequest.allowAnonymousFallback) return retryAnonymously(originalRequest);
+        clearSessionAndRedirect();
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;
@@ -134,7 +143,29 @@ api.interceptors.response.use(
   }
 );
 
+function clearSessionAndRedirect() {
+  clearTokens();
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('startupconnect:session-cleared'));
+    window.location.href = '/auth/login';
+  }
+}
+
+function retryAnonymously(config: InternalAxiosRequestConfig & { _retry?: boolean; _anonymousRetry?: boolean }) {
+  if (config._anonymousRetry) return Promise.reject(new Error('Anonymous fallback failed'));
+  config._anonymousRetry = true;
+  config._retry = true;
+  clearTokens();
+  delete config.headers.Authorization;
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('startupconnect:session-cleared'));
+  return api(config);
+}
+
 export default api;
+
+export function getApiStatus(error: unknown): number | undefined {
+  return axios.isAxiosError(error) ? error.response?.status : undefined;
+}
 
 /**
  * Extract error message from API error response

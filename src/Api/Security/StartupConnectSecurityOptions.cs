@@ -6,6 +6,14 @@ public sealed class StartupConnectSecurityOptions
 
     public bool RequireHttpsRedirection { get; set; } = true;
 
+    public bool EnableHsts { get; set; } = true;
+
+    public int HstsMaxAgeDays { get; set; } = 365;
+
+    public bool EnableSecurityHeaders { get; set; } = true;
+
+    public long MaxRequestBodySizeBytes { get; set; } = 25 * 1024 * 1024;
+
     public string[] KnownProxies { get; set; } = [];
 
     public string[] KnownNetworks { get; set; } = [];

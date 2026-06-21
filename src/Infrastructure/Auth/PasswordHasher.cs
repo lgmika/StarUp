@@ -7,6 +7,8 @@ public sealed class PasswordHasher
     private const int SaltSize = 16;
     private const int KeySize = 32;
     private const int Iterations = 100_000;
+    private const int MinimumAcceptedIterations = 10_000;
+    private const int MaximumAcceptedIterations = 1_000_000;
 
     public string Hash(string password)
     {
@@ -18,22 +20,43 @@ public sealed class PasswordHasher
 
     public bool Verify(string password, string passwordHash)
     {
+        if (string.IsNullOrEmpty(passwordHash))
+        {
+            return false;
+        }
+
         var parts = passwordHash.Split('.', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length != 4 || parts[0] != "PBKDF2-SHA256")
         {
             return false;
         }
 
-        if (!int.TryParse(parts[1], out var iterations))
+        if (!int.TryParse(parts[1], out var iterations) ||
+            iterations is < MinimumAcceptedIterations or > MaximumAcceptedIterations)
         {
             return false;
         }
 
-        var salt = Convert.FromBase64String(parts[2]);
-        var expectedKey = Convert.FromBase64String(parts[3]);
-        var actualKey = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, expectedKey.Length);
+        try
+        {
+            var salt = Convert.FromBase64String(parts[2]);
+            var expectedKey = Convert.FromBase64String(parts[3]);
+            if (salt.Length != SaltSize || expectedKey.Length != KeySize)
+            {
+                return false;
+            }
 
-        return CryptographicOperations.FixedTimeEquals(actualKey, expectedKey);
+            var actualKey = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, KeySize);
+
+            return CryptographicOperations.FixedTimeEquals(actualKey, expectedKey);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
     }
 }
-

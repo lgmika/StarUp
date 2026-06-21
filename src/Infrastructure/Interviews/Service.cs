@@ -1,7 +1,6 @@
 using System.Net;
 using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
-using StartupConnect.Application.Email.Interfaces;
 using StartupConnect.Application.Email.Models;
 using StartupConnect.Application.Interviews.Dtos;
 using StartupConnect.Application.Interviews.Interfaces;
@@ -11,6 +10,7 @@ using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
 using StartupConnect.Infrastructure.Persistence;
+using StartupConnect.Infrastructure.Email;
 using StartupConnect.Shared.Exceptions;
 using StartupConnect.Shared.Responses;
 
@@ -19,13 +19,13 @@ namespace StartupConnect.Infrastructure.Interviews;
 public sealed class InterviewService(
     AppDbContext dbContext,
     INotificationService notificationService,
-    IEmailService emailService,
+    EmailOutboxDispatcher emailOutboxDispatcher,
     IRealtimeNotifier realtimeNotifier) : IInterviewService
 {
     public async Task<InterviewDto> CreateAsync(ClaimsPrincipal principal, Guid applicationId, CreateInterviewRequest request, CancellationToken cancellationToken)
     {
         var actorUserId = GetUserId(principal);
-        ValidateSchedule(request.StartAt, request.EndAt, request.TimeZone, request.MeetingType, request.MeetingUrl, request.Location, allowPast: false);
+        ValidateSchedule(request.StartAt, request.EndAt, request.TimeZone, request.MeetingType, request.MeetingUrl, request.Location, request.Note, allowPast: false);
         var application = await GetApplicationAsync(applicationId, cancellationToken);
         await EnsureCanManageProjectAsync(application.ProjectId, actorUserId, cancellationToken);
 
@@ -92,7 +92,7 @@ public sealed class InterviewService(
     public async Task<InterviewDto> UpdateAsync(ClaimsPrincipal principal, Guid interviewId, UpdateInterviewRequest request, CancellationToken cancellationToken)
     {
         var actorUserId = GetUserId(principal);
-        ValidateSchedule(request.StartAt, request.EndAt, request.TimeZone, request.MeetingType, request.MeetingUrl, request.Location, allowPast: false);
+        ValidateSchedule(request.StartAt, request.EndAt, request.TimeZone, request.MeetingType, request.MeetingUrl, request.Location, request.Note, allowPast: false);
         var interview = await GetInterviewAsync(interviewId, cancellationToken);
         await EnsureCanManageProjectAsync(interview.ProjectId, actorUserId, cancellationToken);
         EnsureMutable(interview);
@@ -246,8 +246,13 @@ public sealed class InterviewService(
                 interviewId,
                 $"/interviews/{interviewId}"), cancellationToken);
 
-            await emailService.SendNotificationEmailAsync(participant.User.Email, new NotificationEmailModel(title, title, message, $"/interviews/{interviewId}", "View interview"), cancellationToken);
+            emailOutboxDispatcher.QueueNotification(
+                participant.UserId,
+                participant.User.Email,
+                new NotificationEmailModel(title, title, message, $"/interviews/{interviewId}", "View interview"));
         }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     private async Task<IReadOnlyCollection<InterviewDto>> MapInterviewsAsync(IQueryable<ProjectInterview> query, CancellationToken cancellationToken)
@@ -345,7 +350,7 @@ public sealed class InterviewService(
             cancellationToken);
     }
 
-    private static void ValidateSchedule(DateTimeOffset startAt, DateTimeOffset endAt, string timeZone, InterviewMeetingType meetingType, string? meetingUrl, string? location, bool allowPast)
+    private static void ValidateSchedule(DateTimeOffset startAt, DateTimeOffset endAt, string timeZone, InterviewMeetingType meetingType, string? meetingUrl, string? location, string? note, bool allowPast)
     {
         if (startAt.ToUniversalTime() >= endAt.ToUniversalTime())
         {
@@ -360,6 +365,17 @@ public sealed class InterviewService(
         if (string.IsNullOrWhiteSpace(timeZone))
         {
             throw new ValidationException([new ErrorDetail("Required", "Time zone is required", "timeZone")]);
+        }
+
+        ValidateMaximumLength(timeZone, 120, "timeZone");
+        ValidateMaximumLength(meetingUrl, 1000, "meetingUrl");
+        ValidateMaximumLength(location, 500, "location");
+        ValidateMaximumLength(note, 2000, "note");
+
+        if (!string.IsNullOrWhiteSpace(meetingUrl) &&
+            (!Uri.TryCreate(meetingUrl.Trim(), UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")))
+        {
+            throw new ValidationException([new ErrorDetail("InvalidUrl", "Meeting URL must be an absolute HTTP/HTTPS URL", "meetingUrl")]);
         }
 
         if (meetingType == InterviewMeetingType.Online && string.IsNullOrWhiteSpace(meetingUrl))
@@ -378,6 +394,16 @@ public sealed class InterviewService(
         if (string.IsNullOrWhiteSpace(reason))
         {
             throw new ValidationException([new ErrorDetail("Required", "Reason is required", "reason")]);
+        }
+
+        ValidateMaximumLength(reason, 1000, "reason");
+    }
+
+    private static void ValidateMaximumLength(string? value, int maximum, string field)
+    {
+        if (!string.IsNullOrWhiteSpace(value) && value.Trim().Length > maximum)
+        {
+            throw new ValidationException([new ErrorDetail("TooLong", $"{field} must be at most {maximum} characters", field)]);
         }
     }
 

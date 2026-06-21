@@ -33,6 +33,9 @@ services:
       Cors__AllowedOrigins__3: ${CORS_ALLOWED_ORIGIN_3:-http://127.0.0.1:5173}
       Security__UseForwardedHeaders: ${SECURITY_USE_FORWARDED_HEADERS:-false}
       Security__RequireHttpsRedirection: ${SECURITY_REQUIRE_HTTPS_REDIRECTION:-false}
+      Security__EnableHsts: ${SECURITY_ENABLE_HSTS:-false}
+      Security__EnableSecurityHeaders: ${SECURITY_ENABLE_HEADERS:-true}
+      Security__MaxRequestBodySizeBytes: ${SECURITY_MAX_REQUEST_BODY_BYTES:-26214400}
       Security__RefreshTokenCookie__Enabled: ${REFRESH_TOKEN_COOKIE_ENABLED:-false}
       Security__RefreshTokenCookie__Secure: ${REFRESH_TOKEN_COOKIE_SECURE:-false}
       Security__RefreshTokenCookie__SameSite: ${REFRESH_TOKEN_COOKIE_SAMESITE:-Lax}

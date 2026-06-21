@@ -1,0 +1,73 @@
+name: Release Containers
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  attestations: write
+  contents: read
+  id-token: write
+  packages: write
+
+concurrency:
+  group: release-containers
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - image: startupconnect-api
+            dockerfile: src/Api/Dockerfile
+            build_args: ""
+          - image: startupconnect-frontend
+            dockerfile: frontend/Dockerfile
+            build_args: NEXT_PUBLIC_API_BASE_URL=${{ vars.PRODUCTION_API_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+      - name: Validate frontend build configuration
+        if: matrix.image == 'startupconnect-frontend'
+        env:
+          PRODUCTION_API_BASE_URL: ${{ vars.PRODUCTION_API_BASE_URL }}
+        run: |
+          case "$PRODUCTION_API_BASE_URL" in
+            https://*) ;;
+            *) echo "PRODUCTION_API_BASE_URL must be a non-empty HTTPS URL." >&2; exit 1 ;;
+          esac
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=sha
+            type=raw,value=latest
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ matrix.build_args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

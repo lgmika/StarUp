@@ -11,6 +11,7 @@ export function useCurrentUser({ requireAuth = false }: { requireAuth?: boolean 
   const user = useAuthStore((state) => state.user);
   const isLoading = useAuthStore((state) => state.isLoading);
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const sessionError = useAuthStore((state) => state.sessionError);
   const loadCurrentUser = useAuthStore((state) => state.loadCurrentUser);
   const setLoading = useAuthStore((state) => state.setLoading);
   const [hasCheckedSession, setHasCheckedSession] = useState(false);
@@ -37,10 +38,10 @@ export function useCurrentUser({ requireAuth = false }: { requireAuth?: boolean 
       }
 
       try {
-        await loadCurrentUser();
+        await loadCurrentUser({ allowAnonymous: !requireAuth });
         if (isMounted) setHasCheckedSession(true);
       } catch {
-        if (isMounted && requireAuth) {
+        if (isMounted && requireAuth && !getAccessToken()) {
           router.replace(`/auth/login?next=${encodeURIComponent(pathname)}`);
         }
         if (isMounted) setHasCheckedSession(true);
@@ -58,5 +59,7 @@ export function useCurrentUser({ requireAuth = false }: { requireAuth?: boolean 
     user,
     isLoading: isLoading || !hasCheckedSession,
     isAuthenticated,
+    sessionError,
+    retrySession: () => loadCurrentUser({ allowAnonymous: !requireAuth }),
   };
 }

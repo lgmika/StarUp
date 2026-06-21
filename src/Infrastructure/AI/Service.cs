@@ -1,10 +1,15 @@
 using System.Net;
+using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Security.Claims;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using StartupConnect.Application.AI.Dtos;
 using StartupConnect.Application.AI.Interfaces;
+using StartupConnect.Application.Admin.Interfaces;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
 using StartupConnect.Infrastructure.Persistence;
@@ -15,7 +20,9 @@ namespace StartupConnect.Infrastructure.AI;
 public sealed class AIService(
     AppDbContext dbContext,
     IAIProvider aiProvider,
-    IOptions<AIOptions> aiOptions) : IAIService
+    IOptions<AIOptions> aiOptions,
+    ISystemSettingReader systemSettingReader,
+    ILogger<AIService> logger) : IAIService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly AIOptions _aiOptions = aiOptions.Value;
@@ -25,13 +32,17 @@ public sealed class AIService(
         var userId = GetUserId(principal);
         var project = await GetProjectAsync(projectId, cancellationToken);
         await EnsureCanManageProjectAsync(projectId, userId, cancellationToken);
-        await EnsureQuotaAsync(userId, cancellationToken);
         var projectContext = await CreateProjectContextAsync(project, cancellationToken);
 
         var aiRequest = CreateRequest(userId, projectId, AIRequestType.ProjectSuggestions, CreateProjectSnapshot(projectContext));
-        dbContext.AIRequests.Add(aiRequest);
+        await ReserveRequestAsync(aiRequest, cancellationToken);
 
-        var recommendations = (await aiProvider.GenerateProjectSuggestionsAsync(projectContext, cancellationToken))
+        var suggestionResults = await ExecuteProviderAsync(
+            () => aiProvider.GenerateProjectSuggestionsAsync(projectContext, cancellationToken),
+            cancellationToken);
+        aiRequest.ResponseSnapshot = JsonSerializer.Serialize(suggestionResults, JsonOptions);
+        aiRequest.IsSuccessful = true;
+        var recommendations = suggestionResults
             .Select(suggestion => new AIRecommendation
             {
                 ProjectId = projectId,
@@ -55,11 +66,18 @@ public sealed class AIService(
         var userId = GetUserId(principal);
         var project = await GetProjectAsync(projectId, cancellationToken);
         await EnsureCanManageProjectAsync(projectId, userId, cancellationToken);
-        await EnsureQuotaAsync(userId, cancellationToken);
         var projectContext = await CreateProjectContextAsync(project, cancellationToken);
-        var result = await aiProvider.ReviewProjectAsync(projectContext, cancellationToken);
-
-        var aiRequest = CreateRequest(userId, projectId, AIRequestType.ProjectReview, CreateProjectSnapshot(projectContext));
+        var aiRequest = CreateRequest(
+            userId,
+            projectId,
+            AIRequestType.ProjectReview,
+            CreateProjectSnapshot(projectContext));
+        await ReserveRequestAsync(aiRequest, cancellationToken);
+        var result = await ExecuteProviderAsync(
+            () => aiProvider.ReviewProjectAsync(projectContext, cancellationToken),
+            cancellationToken);
+        aiRequest.ResponseSnapshot = JsonSerializer.Serialize(result, JsonOptions);
+        aiRequest.IsSuccessful = true;
         var review = new AIReview
         {
             ProjectId = projectId,
@@ -72,7 +90,6 @@ public sealed class AIService(
             Summary = result.Summary
         };
 
-        dbContext.AIRequests.Add(aiRequest);
         dbContext.AIReviews.Add(review);
         AddAudit(userId, "AI.ProjectReview", "Project", projectId);
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -126,12 +143,14 @@ public sealed class AIService(
     public async Task<AITextResponse> CreateCoverLetterAsync(ClaimsPrincipal principal, Guid applicationId, CancellationToken cancellationToken)
     {
         var userId = GetUserId(principal);
-        await EnsureQuotaAsync(userId, cancellationToken);
-
         var applicationSnapshot = await CreateApplicationSnapshotAsync(applicationId, userId, cancellationToken);
-        var result = await aiProvider.GenerateCoverLetterAsync(applicationSnapshot, cancellationToken);
         var aiRequest = CreateRequest(userId, null, AIRequestType.ApplicationCoverLetter, applicationSnapshot);
-        dbContext.AIRequests.Add(aiRequest);
+        await ReserveRequestAsync(aiRequest, cancellationToken);
+        var result = await ExecuteProviderAsync(
+            () => aiProvider.GenerateCoverLetterAsync(applicationSnapshot, cancellationToken),
+            cancellationToken);
+        aiRequest.ResponseSnapshot = result.Content;
+        aiRequest.IsSuccessful = true;
         AddAudit(userId, "AI.CoverLetter", "Application", applicationId);
         await dbContext.SaveChangesAsync(cancellationToken);
 
@@ -143,12 +162,18 @@ public sealed class AIService(
         var userId = GetUserId(principal);
         var project = await GetProjectAsync(projectId, cancellationToken);
         await EnsureCanViewProjectAsync(projectId, userId, cancellationToken);
-        await EnsureQuotaAsync(userId, cancellationToken);
         var projectContext = await CreateProjectContextAsync(project, cancellationToken);
-        var result = await aiProvider.GenerateInvestorSummaryAsync(projectContext, cancellationToken);
-
-        var aiRequest = CreateRequest(userId, projectId, AIRequestType.InvestorSummary, CreateProjectSnapshot(projectContext));
-        dbContext.AIRequests.Add(aiRequest);
+        var aiRequest = CreateRequest(
+            userId,
+            projectId,
+            AIRequestType.InvestorSummary,
+            CreateProjectSnapshot(projectContext));
+        await ReserveRequestAsync(aiRequest, cancellationToken);
+        var result = await ExecuteProviderAsync(
+            () => aiProvider.GenerateInvestorSummaryAsync(projectContext, cancellationToken),
+            cancellationToken);
+        aiRequest.ResponseSnapshot = result.Content;
+        aiRequest.IsSuccessful = true;
         AddAudit(userId, "AI.InvestorSummary", "Project", projectId);
         await dbContext.SaveChangesAsync(cancellationToken);
 
@@ -196,7 +221,7 @@ public sealed class AIService(
 
     private async Task EnsureQuotaAsync(Guid userId, CancellationToken cancellationToken)
     {
-        var today = DateTimeOffset.UtcNow.Date;
+        var today = new DateTimeOffset(DateTime.UtcNow.Date, TimeSpan.Zero);
         var tomorrow = today.AddDays(1);
         var used = await dbContext.AIRequests.CountAsync(request =>
             request.UserId == userId &&
@@ -204,13 +229,62 @@ public sealed class AIService(
             request.CreatedAt < tomorrow,
             cancellationToken);
 
-        if (used >= _aiOptions.DailyQuota)
+        var dailyQuota = await systemSettingReader.GetInt64Async("AI.DailyQuota", _aiOptions.DailyQuota, cancellationToken);
+        if (dailyQuota is < 1 or > 10_000)
+        {
+            throw new InvalidOperationException("AI.DailyQuota must be between 1 and 10000.");
+        }
+
+        if (used >= dailyQuota)
         {
             throw new ApiException("Daily AI quota exceeded", HttpStatusCode.TooManyRequests);
         }
     }
 
-    private AIRequest CreateRequest(Guid userId, Guid? projectId, AIRequestType type, string promptSnapshot)
+    private async Task ReserveRequestAsync(AIRequest request, CancellationToken cancellationToken)
+    {
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        var lockBytes = SHA256.HashData(Encoding.UTF8.GetBytes($"ai-quota:{request.UserId:D}:{DateTimeOffset.UtcNow:yyyy-MM-dd}"));
+        var lockKey = BinaryPrimitives.ReadInt64BigEndian(lockBytes);
+        await dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT pg_advisory_xact_lock({lockKey})",
+            cancellationToken);
+
+        await EnsureQuotaAsync(request.UserId, cancellationToken);
+        dbContext.AIRequests.Add(request);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private async Task<T> ExecuteProviderAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await action();
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning(exception, "AI provider {Provider} timed out.", aiProvider.Name);
+            throw new ApiException("AI provider timed out", HttpStatusCode.GatewayTimeout);
+        }
+        catch (HttpRequestException exception)
+        {
+            logger.LogWarning(exception, "AI provider {Provider} is unavailable.", aiProvider.Name);
+            throw new ApiException("AI provider is temporarily unavailable", HttpStatusCode.ServiceUnavailable);
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        {
+            logger.LogWarning(exception, "AI provider {Provider} returned an invalid response.", aiProvider.Name);
+            throw new ApiException("AI provider returned an invalid response", HttpStatusCode.BadGateway);
+        }
+    }
+
+    private AIRequest CreateRequest(
+        Guid userId,
+        Guid? projectId,
+        AIRequestType type,
+        string promptSnapshot,
+        string? responseSnapshot = null)
     {
         return new AIRequest
         {
@@ -218,7 +292,9 @@ public sealed class AIService(
             ProjectId = projectId,
             RequestType = type,
             PromptSnapshot = promptSnapshot,
-            Provider = aiProvider.Name
+            ResponseSnapshot = responseSnapshot,
+            Provider = aiProvider.Name,
+            IsSuccessful = responseSnapshot is not null
         };
     }
 

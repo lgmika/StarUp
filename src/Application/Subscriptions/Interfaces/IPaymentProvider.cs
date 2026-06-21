@@ -14,6 +14,10 @@ public interface IPaymentProvider
         string? cancelUrl,
         CancellationToken cancellationToken);
 
+    Task CancelSubscriptionAsync(string? providerSubscriptionId, CancellationToken cancellationToken);
+
+    Task ResumeSubscriptionAsync(string? providerSubscriptionId, CancellationToken cancellationToken);
+
     bool VerifyWebhookSignature(string payloadJson, string? signature);
 
     PaymentProviderWebhookPayload ParseWebhookPayload(string payloadJson);

@@ -40,12 +40,20 @@ Start PostgreSQL:
 docker compose up -d postgres
 ```
 
+For direct `dotnet run`, keep the local database password out of tracked settings:
+
+```bash
+dotnet user-secrets set "ConnectionStrings:DefaultConnection" "Host=localhost;Port=55432;Database=startupconnect;Username=startupconnect;Password=<local-password>" --project src/Api/StartupConnect.Api.csproj
+```
+
 Apply migrations:
 
 ```bash
 dotnet tool restore
 dotnet ef database update --project src/Infrastructure/StartupConnect.Infrastructure.csproj --startup-project src/Api/StartupConnect.Api.csproj
 ```
+
+Migration tooling uses `ConnectionStrings__DefaultConnection` (or `STARTUPCONNECT_DESIGN_CONNECTION`) through a design-time context factory, so migration bundles do not depend on booting the complete API host.
 
 Run API:
 
@@ -63,7 +71,95 @@ npm run dev
 
 Frontend defaults to `NEXT_PUBLIC_API_BASE_URL=http://localhost:8080/api/v1`.
 Backend CORS allows `localhost` and `127.0.0.1` on ports `3000` and `5173`.
-Authentication tokens are stored in `localStorage` for this phase. Notification, Admin, and user Report screens use a mock service until backend endpoints are added.
+Authentication tokens are stored in `localStorage` for the current frontend contract.
+
+## End-to-End Tests
+
+The Playwright suite covers backend health, authentication, protected-route redirects,
+role dashboards, and admin authorization on desktop and mobile Chrome.
+
+```bash
+docker compose up -d postgres api
+cd frontend
+npx playwright install ffmpeg
+npm run test:e2e
+```
+
+Use `npm run test:e2e:headed` to watch the run or `npm run test:e2e:report`
+to open the latest HTML report. Set `E2E_BASE_URL` or `E2E_API_BASE_URL` to test
+non-default deployments.
+
+## Production Deployment
+
+CI runs backend tests, frontend lint/build, Playwright E2E, production operations
+configuration validation, and both container builds.
+After CI succeeds on `main`, the release workflow publishes API and frontend images
+to GHCR with build provenance attestations. Configure the repository variable
+`PRODUCTION_API_BASE_URL` before release.
+
+```bash
+cp .env.production.example .env.production
+# Replace every CHANGE_ME value and set the GHCR image owner.
+docker compose --env-file .env.production -f docker-compose.production.yml pull
+docker compose --env-file .env.production -f docker-compose.production.yml up -d
+```
+
+The production compose file runs EF migrations before starting the API. Bundled
+Caddy terminates HTTPS for `APP_DOMAIN` and `API_DOMAIN`; both DNS records must
+point to the server and ports 80/443 must be open. API and frontend additionally
+bind to `127.0.0.1` for local diagnostics.
+
+If `172.29.0.0/24` conflicts with an existing Docker network, change
+`EDGE_SUBNET` and keep `CADDY_PROXY_IP` inside that subnet. The API trusts only
+that proxy address when processing forwarded HTTPS headers.
+
+Deploy and verify from the server:
+
+```powershell
+.\tools\deploy-production.ps1 `
+  -EnvironmentFile .env.production `
+  -ApiBaseUrl https://api.example.com/api/v1 `
+  -FrontendUrl https://app.example.com
+```
+
+Linux production hosts can use the equivalent Bash script:
+
+```bash
+bash ./tools/deploy-production.sh \
+  .env.production \
+  docker-compose.production.yml \
+  https://api.example.com/api/v1 \
+  https://app.example.com
+```
+
+The `Deploy Production` workflow performs a manually approved deployment through
+the GitHub `production` environment. Configure these environment secrets:
+`PRODUCTION_SSH_HOST`, `PRODUCTION_SSH_USER`, `PRODUCTION_SSH_PRIVATE_KEY`,
+`PRODUCTION_SSH_KNOWN_HOSTS`, and `PRODUCTION_DEPLOY_PATH`. The target host must
+already contain `.env.production`, Docker Compose, `curl`, and authenticated GHCR
+access. Compose, Caddy, and deployment scripts are uploaded by the workflow.
+Direct tag pushes do not publish untested images; release images are created only
+after CI succeeds on `main`.
+
+Backup and restore verification:
+
+```powershell
+.\tools\backup-postgres.ps1
+.\tools\restore-postgres.ps1 -BackupFile .\backups\startupconnect_TIMESTAMP.dump -TargetDatabase startupconnect_restore_test
+```
+
+Restoring over an existing database requires the explicit
+`-ConfirmDatabaseReplacement` switch.
+
+Rollback to previously published image tags:
+
+```powershell
+.\tools\rollback-production.ps1 `
+  -PreviousApiImage ghcr.io/owner/startupconnect-api:sha-PREVIOUS `
+  -PreviousFrontendImage ghcr.io/owner/startupconnect-frontend:sha-PREVIOUS `
+  -ApiBaseUrl https://api.example.com/api/v1 `
+  -FrontendUrl https://app.example.com
+```
 
 Useful endpoints:
 
@@ -88,6 +184,10 @@ Cors:AllowedOrigins
 Security:UseForwardedHeaders
 Security:RequireHttpsRedirection
 Security:KnownProxies
+Security:EnableHsts
+Security:HstsMaxAgeDays
+Security:EnableSecurityHeaders
+Security:MaxRequestBodySizeBytes
 Security:RefreshTokenCookie:Enabled
 Security:RefreshTokenCookie:Secure
 Security:RefreshTokenCookie:SameSite
@@ -117,11 +217,13 @@ dotnet ef database update --project src/Infrastructure/StartupConnect.Infrastruc
 dotnet run --project src/Api/StartupConnect.Api.csproj
 ```
 
-Register and forgot-password now send links through `IEmailService`. In development, emails are written to `src/Api/App_Data/emails` when running the API locally. Set `Email:Provider=Smtp` and the `Email:Smtp:*` settings, or the matching `Email__...` environment variables, to use a real SMTP provider.
+Authentication, project invitation, and interview notification emails are committed to `email_outbox_messages` in the same database transaction as the domain change. Payloads are AES-GCM encrypted, and the hosted dispatcher claims batches with PostgreSQL row locks plus a lease before sending outside the transaction. Configure `Email:Outbox:EncryptionKey`, `PollSeconds`, `BatchSize`, `MaxAttempts`, and `LeaseSeconds` for production.
+
+In development, dispatched emails are written to `src/Api/App_Data/emails`. Set `Email:Provider=Smtp` and the `Email:Smtp:*` settings, or the matching `Email__...` environment variables, to use a real SMTP provider.
 
 Email verification and password reset tokens are stored as hashes, expire by configuration, and reset tokens can only be used once.
 
-Production email startup validation requires `Email:Provider=Smtp`, a non-local `Email:FromEmail`, an HTTPS `Email:AppBaseUrl`, and SMTP host/username/password. Set `Email:RequireVerifiedSenderDomain=true` with `Email:VerifiedSenderDomain=your-domain.com` after SPF/DKIM/DMARC are verified in your mail provider. SMTP sends use `Email:Smtp:TimeoutSeconds` and `Email:Smtp:MaxRetryAttempts` to avoid hanging requests during transient provider failures.
+Production email startup validation requires `Email:Provider=Smtp`, a non-local `Email:FromEmail`, an HTTPS `Email:AppBaseUrl`, SMTP credentials, an enabled outbox, and a dedicated outbox encryption key. Set `Email:RequireVerifiedSenderDomain=true` with `Email:VerifiedSenderDomain=your-domain.com` after SPF/DKIM/DMARC are verified in your mail provider. All email action links are restricted to the configured app origin.
 
 ## Phase 3 Profile Endpoints
 
@@ -170,7 +272,10 @@ powershell -ExecutionPolicy Bypass -File .\tools\backup-postgres.ps1
 The script writes custom-format `.dump` files to `backups/` by default and keeps the latest 14 backups. Restore with:
 
 ```powershell
-docker exec -i startupconnect-postgres pg_restore -U startupconnect -d startupconnect --clean --if-exists < .\backups\startupconnect_YYYYMMDD_HHMMSS.dump
+powershell -ExecutionPolicy Bypass -File .\tools\restore-postgres.ps1 `
+  -BackupFile .\backups\startupconnect_YYYYMMDD_HHMMSS.dump `
+  -TargetDatabase startupconnect `
+  -ConfirmDatabaseReplacement
 ```
 
 ## Phase 4 Project Core Endpoints
@@ -233,6 +338,15 @@ Then set:
 ```
 
 AI results are advisory only, persisted for review, and limited to 20 requests per user per UTC day by default.
+Generated responses are stored with their AI request for audit and reuse. Investor
+project discovery returns the latest successful persisted investor summary, or
+`null` when no summary has been generated; it never fabricates a fallback summary.
+
+Production rejects `AI:Provider=Mock`. Configure `AI_OLLAMA_BASE_URL`,
+`AI_OLLAMA_MODEL`, `AI_DAILY_QUOTA`, and `AI_OLLAMA_TIMEOUT_SECONDS` in
+`.env.production`. The Ollama endpoint may run on another internal host, but it
+must be reachable from the API container and the configured model must already be
+pulled. Unknown provider names fail startup instead of silently using mock output.
 
 ## Phase 12 Notification Endpoints
 
@@ -416,7 +530,10 @@ Dashboard aggregates are served through `IDashboardService` with a short in-memo
 
 User dashboard includes applications by status, upcoming interviews, joined projects, saved projects, and profile completion. Founder project dashboard includes saved count, applications, application conversion, team size, investor interests, NDA agreements, and recent application status history for that project. Investor dashboard includes interested projects, interest status counts, NDA pending, accepted access grants, and saved projects.
 
-Project dashboard requires founder/co-founder access. Investor dashboard requires the Investor role. `ProjectViews` currently returns `0` because the backend does not yet have a project view tracking table; no fake view metrics are generated.
+Project dashboard requires founder/co-founder access. Investor dashboard requires
+the Investor role. `ProjectViews` is backed by daily de-duplicated view records.
+Owner views are excluded; authenticated viewers are keyed by user and anonymous
+viewers use a first-party opaque visitor cookie without storing IP or user-agent.
 
 ## Phase 23 Cloud File Storage
 
@@ -456,13 +573,15 @@ The backend does not trust payment state from the frontend and does not store ca
 ```http
 GET  /api/v1/admin/background-jobs
 POST /api/v1/admin/background-jobs/run
+GET  /api/v1/admin/email-outbox
+POST /api/v1/admin/email-outbox/{messageId}/retry
 ```
 
 Background maintenance runs through `StartupConnectBackgroundWorker` and `IBackgroundJobService`. The worker uses PostgreSQL advisory locks so multiple backend instances do not run the same maintenance batch at the same time. Each job writes a row to `background_job_executions` with status, attempt count, processed item count, lock key, and failure message when it reaches the failed state.
 
-Current jobs clean expired email/password tokens, revoke expired refresh tokens, expire pending project invitations, clean old orphan files through `IFileStorageService`, expire subscriptions whose current period has ended, and record an analytics aggregate pass. Retry count, batch size, interval, enabled flag, and lock key are controlled by the `BackgroundJobs` config section.
+Current jobs clean expired email/password tokens, prune sent and terminally failed email outbox rows and old execution history by retention policy, revoke expired refresh tokens, remove stale revoked refresh tokens after their security retention window, expire pending project invitations, clean old orphan files through `IFileStorageService`, and expire subscriptions whose current period has ended. Retry count, batch size, interval, retention periods, enabled flag, and lock key are controlled by the `BackgroundJobs` config section.
 
-Important production rule: critical work is persisted in the database, not kept in an in-memory queue. Email retry, async AI processing, notification digests, and separate search indexing can be added as persisted job tables or provider-backed queues using the same execution-log pattern.
+Important production rule: critical work is persisted in the database, not kept in an in-memory queue. Email delivery already uses the encrypted database outbox; future notification digests and separate search indexing should follow the same persisted-job pattern.
 
 ## Phase 6 Moderator Review Endpoints
 

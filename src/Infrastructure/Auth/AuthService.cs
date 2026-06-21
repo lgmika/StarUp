@@ -3,9 +3,9 @@ using System.Net.Mail;
 using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using StartupConnect.Application.Auth.Dtos;
 using StartupConnect.Application.Auth.Interfaces;
-using StartupConnect.Application.Email.Interfaces;
 using StartupConnect.Domain.Constants;
 using StartupConnect.Domain.Entities;
 using StartupConnect.Domain.Enums;
@@ -21,7 +21,7 @@ public sealed class AuthService(
     PasswordHasher passwordHasher,
     SecureTokenGenerator tokenGenerator,
     JwtTokenService jwtTokenService,
-    IEmailService emailService,
+    EmailOutboxDispatcher emailOutboxDispatcher,
     IOptions<JwtOptions> jwtOptions,
     IOptions<EmailOptions> emailOptions) : IAuthService
 {
@@ -39,37 +39,54 @@ public sealed class AuthService(
             throw new ApiException("Email is already registered", HttpStatusCode.Conflict);
         }
 
-        var userRole = await GetRoleAsync(SystemRoles.User, cancellationToken);
-        var user = new User
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        try
         {
-            Email = request.Email.Trim(),
-            NormalizedEmail = normalizedEmail,
-            FullName = request.FullName.Trim(),
-            PasswordHash = passwordHasher.Hash(request.Password)
-        };
+            var userRole = await GetRoleAsync(SystemRoles.User, cancellationToken);
+            var user = new User
+            {
+                Email = request.Email.Trim(),
+                NormalizedEmail = normalizedEmail,
+                FullName = request.FullName.Trim(),
+                PasswordHash = passwordHasher.Hash(request.Password)
+            };
 
-        user.UserRoles.Add(new UserRole { User = user, Role = userRole });
-        dbContext.Users.Add(user);
+            user.UserRoles.Add(new UserRole { User = user, Role = userRole });
+            dbContext.Users.Add(user);
 
-        var verificationToken = tokenGenerator.CreateToken();
-        dbContext.EmailVerificationTokens.Add(new EmailVerificationToken
+            var verificationToken = tokenGenerator.CreateToken();
+            dbContext.EmailVerificationTokens.Add(new EmailVerificationToken
+            {
+                User = user,
+                TokenHash = tokenGenerator.HashToken(verificationToken),
+                ExpiresAt = DateTimeOffset.UtcNow.AddHours(_emailOptions.VerificationTokenHours)
+            });
+
+            emailOutboxDispatcher.QueueVerification(user.Id, user.Email, BuildVerificationUrl(user.Email, verificationToken));
+            AddAudit(user.Id, "Auth.Register", "User", user.Id, ipAddress, null);
+            await dbContext.SaveChangesAsync(cancellationToken);
+
+            var response = await CreateAuthResponseAsync(user, ipAddress, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return response;
+        }
+        catch (DbUpdateException exception) when (
+            exception.InnerException is PostgresException
+            {
+                SqlState: PostgresErrorCodes.UniqueViolation,
+                ConstraintName: "IX_users_NormalizedEmail"
+            })
         {
-            User = user,
-            TokenHash = tokenGenerator.HashToken(verificationToken),
-            ExpiresAt = DateTimeOffset.UtcNow.AddHours(_emailOptions.VerificationTokenHours)
-        });
-
-        AddAudit(user.Id, "Auth.Register", "User", user.Id, ipAddress, null);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await emailService.SendEmailVerificationAsync(user.Email, BuildVerificationUrl(user.Email, verificationToken), cancellationToken);
-
-        return await CreateAuthResponseAsync(user, ipAddress, cancellationToken);
+            await transaction.RollbackAsync(cancellationToken);
+            throw new ApiException("Email is already registered", HttpStatusCode.Conflict);
+        }
     }
 
     public async Task<AuthResponse> LoginAsync(LoginRequest request, string? ipAddress, CancellationToken cancellationToken)
     {
         ValidateEmail(request.Email);
         ValidateRequired(request.Password, "password", "Password is required");
+        ValidateMaximumLength(request.Password, 128, "password", "Password must be at most 128 characters");
 
         var normalizedEmail = NormalizeEmail(request.Email);
         var user = await GetUserWithRolesAsync(normalizedEmail, cancellationToken);
@@ -90,7 +107,7 @@ public sealed class AuthService(
 
     public async Task<AuthResponse> RefreshTokenAsync(RefreshTokenRequest request, string? ipAddress, CancellationToken cancellationToken)
     {
-        ValidateRequired(request.RefreshToken, "refreshToken", "Refresh token is required");
+        ValidateToken(request.RefreshToken, "refreshToken", "Refresh token");
 
         var tokenHash = tokenGenerator.HashToken(request.RefreshToken);
         var refreshToken = await dbContext.RefreshTokens
@@ -99,8 +116,18 @@ public sealed class AuthService(
             .ThenInclude(userRole => userRole.Role)
             .FirstOrDefaultAsync(token => token.TokenHash == tokenHash, cancellationToken);
 
-        if (refreshToken is null || !refreshToken.IsActive)
+        if (refreshToken is null)
         {
+            throw new ApiException("Invalid refresh token", HttpStatusCode.Unauthorized);
+        }
+
+        if (!refreshToken.IsActive)
+        {
+            if (refreshToken.RevokedAt is not null && refreshToken.ReplacedByTokenHash is not null)
+            {
+                await RevokeTokenFamilyAsync(refreshToken.UserId, ipAddress, cancellationToken);
+            }
+
             throw new ApiException("Invalid refresh token", HttpStatusCode.Unauthorized);
         }
 
@@ -116,14 +143,38 @@ public sealed class AuthService(
         var replacement = CreateRefreshToken(refreshToken.User, replacementHash, ipAddress);
         dbContext.RefreshTokens.Add(replacement);
         AddAudit(refreshToken.UserId, "Auth.RefreshToken", "User", refreshToken.UserId, ipAddress, null);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new ApiException("Refresh token has already been used", HttpStatusCode.Unauthorized);
+        }
 
         return CreateAuthResponse(refreshToken.User, replacementToken, replacement.ExpiresAt);
     }
 
+    private async Task RevokeTokenFamilyAsync(Guid userId, string? ipAddress, CancellationToken cancellationToken)
+    {
+        var activeTokens = await dbContext.RefreshTokens
+            .Where(token => token.UserId == userId && token.RevokedAt == null && token.ExpiresAt > DateTimeOffset.UtcNow)
+            .ToListAsync(cancellationToken);
+
+        var now = DateTimeOffset.UtcNow;
+        foreach (var token in activeTokens)
+        {
+            token.RevokedAt = now;
+            token.RevokedByIp = ipAddress;
+        }
+
+        AddAudit(userId, "Auth.RefreshTokenReuse", "User", userId, ipAddress, null);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
     public async Task LogoutAsync(LogoutRequest request, string? ipAddress, CancellationToken cancellationToken)
     {
-        ValidateRequired(request.RefreshToken, "refreshToken", "Refresh token is required");
+        ValidateToken(request.RefreshToken, "refreshToken", "Refresh token");
 
         var tokenHash = tokenGenerator.HashToken(request.RefreshToken);
         var refreshToken = await dbContext.RefreshTokens.FirstOrDefaultAsync(token => token.TokenHash == tokenHash, cancellationToken);
@@ -141,10 +192,11 @@ public sealed class AuthService(
     public async Task VerifyEmailAsync(VerifyEmailRequest request, CancellationToken cancellationToken)
     {
         ValidateEmail(request.Email);
-        ValidateRequired(request.Token, "token", "Verification token is required");
+        ValidateToken(request.Token, "token", "Verification token");
 
         var normalizedEmail = NormalizeEmail(request.Email);
         var tokenHash = tokenGenerator.HashToken(request.Token);
+        await using var transaction = await BeginTokenOperationAsync("verify-email", tokenHash, cancellationToken);
 
         var token = await dbContext.EmailVerificationTokens
             .Include(emailToken => emailToken.User)
@@ -175,6 +227,7 @@ public sealed class AuthService(
 
         AddAudit(token.UserId, "Auth.VerifyEmail", "User", token.UserId, null, null);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 
     public async Task ResendVerificationAsync(ResendVerificationRequest request, CancellationToken cancellationToken)
@@ -188,16 +241,26 @@ public sealed class AuthService(
             return;
         }
 
-        var resendAfter = DateTimeOffset.UtcNow.AddMinutes(-_emailOptions.ResendCooldownMinutes);
+        var now = DateTimeOffset.UtcNow;
+        var resendAfter = now.AddMinutes(-_emailOptions.ResendCooldownMinutes);
         var recentTokenExists = await dbContext.EmailVerificationTokens.AnyAsync(
             token => token.UserId == user.Id &&
                 token.UsedAt == null &&
+                token.ExpiresAt > now &&
                 token.CreatedAt >= resendAfter,
             cancellationToken);
 
         if (recentTokenExists)
         {
             throw new ApiException("Please wait before requesting another verification email", HttpStatusCode.TooManyRequests);
+        }
+
+        var previousTokens = await dbContext.EmailVerificationTokens
+            .Where(token => token.UserId == user.Id && token.UsedAt == null && token.ExpiresAt > now)
+            .ToListAsync(cancellationToken);
+        foreach (var token in previousTokens)
+        {
+            token.UsedAt = now;
         }
 
         var verificationToken = tokenGenerator.CreateToken();
@@ -208,9 +271,9 @@ public sealed class AuthService(
             ExpiresAt = DateTimeOffset.UtcNow.AddHours(_emailOptions.VerificationTokenHours)
         });
 
+        emailOutboxDispatcher.QueueVerification(user.Id, user.Email, BuildVerificationUrl(user.Email, verificationToken));
         AddAudit(user.Id, "Auth.ResendVerification", "User", user.Id, null, null);
         await dbContext.SaveChangesAsync(cancellationToken);
-        await emailService.SendEmailVerificationAsync(user.Email, BuildVerificationUrl(user.Email, verificationToken), cancellationToken);
     }
 
     public async Task<ForgotPasswordResponse> ForgotPasswordAsync(ForgotPasswordRequest request, CancellationToken cancellationToken)
@@ -224,6 +287,24 @@ public sealed class AuthService(
             return new ForgotPasswordResponse("If the email exists, a password reset email has been sent.");
         }
 
+        var now = DateTimeOffset.UtcNow;
+        var resendAfter = now.AddMinutes(-_emailOptions.ResendCooldownMinutes);
+        var recentTokenExists = await dbContext.PasswordResetTokens.AnyAsync(
+            token => token.UserId == user.Id && token.UsedAt == null && token.ExpiresAt > now && token.CreatedAt >= resendAfter,
+            cancellationToken);
+        if (recentTokenExists)
+        {
+            return new ForgotPasswordResponse("If the email exists, a password reset email has been sent.");
+        }
+
+        var previousTokens = await dbContext.PasswordResetTokens
+            .Where(token => token.UserId == user.Id && token.UsedAt == null && token.ExpiresAt > now)
+            .ToListAsync(cancellationToken);
+        foreach (var token in previousTokens)
+        {
+            token.UsedAt = now;
+        }
+
         var resetToken = tokenGenerator.CreateToken();
         dbContext.PasswordResetTokens.Add(new PasswordResetToken
         {
@@ -232,9 +313,9 @@ public sealed class AuthService(
             ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(_emailOptions.PasswordResetTokenMinutes)
         });
 
+        emailOutboxDispatcher.QueuePasswordReset(user.Id, user.Email, BuildPasswordResetUrl(user.Email, resetToken));
         AddAudit(user.Id, "Auth.ForgotPassword", "User", user.Id, null, null);
         await dbContext.SaveChangesAsync(cancellationToken);
-        await emailService.SendPasswordResetAsync(user.Email, BuildPasswordResetUrl(user.Email, resetToken), cancellationToken);
 
         return new ForgotPasswordResponse("If the email exists, a password reset email has been sent.");
     }
@@ -243,10 +324,11 @@ public sealed class AuthService(
     {
         ValidateEmail(request.Email);
         ValidatePassword(request.NewPassword);
-        ValidateRequired(request.Token, "token", "Password reset token is required");
+        ValidateToken(request.Token, "token", "Password reset token");
 
         var normalizedEmail = NormalizeEmail(request.Email);
         var tokenHash = tokenGenerator.HashToken(request.Token);
+        await using var transaction = await BeginTokenOperationAsync("reset-password", tokenHash, cancellationToken);
 
         var resetToken = await dbContext.PasswordResetTokens
             .Include(token => token.User)
@@ -260,21 +342,40 @@ public sealed class AuthService(
             throw new ApiException("Invalid or expired password reset token", HttpStatusCode.BadRequest);
         }
 
-        resetToken.UsedAt = DateTimeOffset.UtcNow;
+        var now = DateTimeOffset.UtcNow;
+        resetToken.UsedAt = now;
         resetToken.User.PasswordHash = passwordHasher.Hash(request.NewPassword);
-        resetToken.User.UpdatedAt = DateTimeOffset.UtcNow;
+        resetToken.User.UpdatedAt = now;
 
-        var activeRefreshTokens = await dbContext.RefreshTokens
-            .Where(token => token.UserId == resetToken.UserId && token.RevokedAt == null && token.ExpiresAt > DateTimeOffset.UtcNow)
-            .ToListAsync(cancellationToken);
-
-        foreach (var refreshToken in activeRefreshTokens)
-        {
-            refreshToken.RevokedAt = DateTimeOffset.UtcNow;
-        }
+        await dbContext.RefreshTokens
+            .Where(token => token.UserId == resetToken.UserId && token.RevokedAt == null && token.ExpiresAt > now)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(token => token.RevokedAt, now), cancellationToken);
 
         AddAudit(resetToken.UserId, "Auth.ResetPassword", "User", resetToken.UserId, null, null);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private async Task<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction> BeginTokenOperationAsync(
+        string operation,
+        string tokenHash,
+        CancellationToken cancellationToken)
+    {
+        var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var lockResource = $"auth:{operation}:{tokenHash}";
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({lockResource}, 0))",
+                cancellationToken);
+            return transaction;
+        }
+        catch
+        {
+            await transaction.DisposeAsync();
+            throw;
+        }
     }
 
     public async Task<AuthUserDto> GetCurrentUserAsync(ClaimsPrincipal principal, CancellationToken cancellationToken)
@@ -428,10 +529,16 @@ public sealed class AuthService(
     private static void ValidateEmail(string email)
     {
         ValidateRequired(email, "email", "Email is required");
+        ValidateMaximumLength(email.Trim(), 255, "email", "Email must be at most 255 characters");
 
         try
         {
-            _ = new MailAddress(email);
+            var normalizedInput = email.Trim();
+            var parsed = new MailAddress(normalizedInput);
+            if (!parsed.Address.Equals(normalizedInput, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new FormatException();
+            }
         }
         catch (FormatException)
         {
@@ -446,6 +553,22 @@ public sealed class AuthService(
         if (password.Length < 8)
         {
             throw new ValidationException([new ErrorDetail("WeakPassword", "Password must be at least 8 characters", "password")]);
+        }
+
+        ValidateMaximumLength(password, 128, "password", "Password must be at most 128 characters");
+    }
+
+    private static void ValidateToken(string token, string field, string displayName)
+    {
+        ValidateRequired(token, field, $"{displayName} is required");
+        ValidateMaximumLength(token, 512, field, $"{displayName} is invalid");
+    }
+
+    private static void ValidateMaximumLength(string value, int maxLength, string field, string message)
+    {
+        if (value.Length > maxLength)
+        {
+            throw new ValidationException([new ErrorDetail("TooLong", message, field)]);
         }
     }
 

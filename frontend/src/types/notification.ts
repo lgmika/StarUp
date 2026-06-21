@@ -1,8 +1,5 @@
 import { NotificationType } from './enums';
 
-// Note: Backend notification endpoints are not yet implemented.
-// These types are prepared for future integration.
-
 export interface NotificationDto {
   id: string;
   userId?: string;

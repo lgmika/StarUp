@@ -20,11 +20,10 @@ public static class HealthCheckExtensions
             {
                 name = entry.Key,
                 status = entry.Value.Status.ToString(),
-                error = entry.Value.Exception?.Message
+                error = entry.Value.Exception is null ? null : "Health check failed"
             })
         });
 
         return JsonSerializer.SerializeAsync(context.Response.Body, payload, JsonOptions);
     }
 }
-

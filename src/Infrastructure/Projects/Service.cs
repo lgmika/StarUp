@@ -23,10 +23,19 @@ public sealed class ProjectService(
     public async Task<IReadOnlyCollection<ProjectSummaryDto>> ListProjectsAsync(string? search, CancellationToken cancellationToken)
     {
         var query = BaseProjectQuery()
-            .Where(project => project.Status == ProjectStatus.Published);
+            .Where(project =>
+                project.Status == ProjectStatus.Published &&
+                dbContext.ProjectVisibilitySettings.Any(setting =>
+                    setting.ProjectId == project.Id &&
+                    (setting.Visibility == ProjectVisibility.Public || setting.Visibility == ProjectVisibility.Limited)));
 
         if (!string.IsNullOrWhiteSpace(search))
         {
+            if (search.Trim().Length > 200)
+            {
+                throw new ValidationException([new ErrorDetail("SearchTooLong", "Search must be at most 200 characters", "search")]);
+            }
+
             var keyword = search.Trim().ToLowerInvariant();
             query = query.Where(project =>
                 project.Title.ToLower().Contains(keyword) ||
@@ -35,6 +44,7 @@ public sealed class ProjectService(
 
         var projects = await query
             .OrderByDescending(project => project.CreatedAt)
+            .Take(200)
             .ToArrayAsync(cancellationToken);
 
         return projects.Select(MapSummary).ToArray();
@@ -51,6 +61,49 @@ public sealed class ProjectService(
         }
 
         return MapDetail(project);
+    }
+
+    public async Task RecordProjectViewAsync(
+        ClaimsPrincipal? principal,
+        Guid projectId,
+        Guid visitorId,
+        CancellationToken cancellationToken)
+    {
+        var viewerUserId = TryGetUserId(principal);
+        var ownerUserId = await dbContext.Projects
+            .Where(project => project.Id == projectId && !project.IsDeleted)
+            .Select(project => project.OwnerUserId)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (ownerUserId == Guid.Empty || ownerUserId == viewerUserId)
+        {
+            return;
+        }
+
+        var viewId = Guid.NewGuid();
+        var viewedOn = DateOnly.FromDateTime(DateTime.UtcNow);
+        var createdAt = DateTimeOffset.UtcNow;
+
+        if (viewerUserId is not null)
+        {
+            await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO project_views ("Id", "ProjectId", "ViewerUserId", "VisitorId", "ViewedOn", "CreatedAt", "UpdatedAt")
+                VALUES ({viewId}, {projectId}, {viewerUserId.Value}, NULL, {viewedOn}, {createdAt}, NULL)
+                ON CONFLICT ("ProjectId", "ViewerUserId", "ViewedOn") DO NOTHING
+                """, cancellationToken);
+            return;
+        }
+
+        if (visitorId == Guid.Empty)
+        {
+            return;
+        }
+
+        await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO project_views ("Id", "ProjectId", "ViewerUserId", "VisitorId", "ViewedOn", "CreatedAt", "UpdatedAt")
+            VALUES ({viewId}, {projectId}, NULL, {visitorId}, {viewedOn}, {createdAt}, NULL)
+            ON CONFLICT ("ProjectId", "VisitorId", "ViewedOn") DO NOTHING
+            """, cancellationToken);
     }
 
     public async Task<ProjectDetailDto> CreateDraftAsync(ClaimsPrincipal principal, CreateProjectDraftRequest request, CancellationToken cancellationToken)
@@ -100,6 +153,7 @@ public sealed class ProjectService(
 
         var project = await GetProjectAggregateAsync(projectId, cancellationToken);
         await EnsureCanManageProjectAsync(project.Id, userId, cancellationToken);
+        var requiresModeration = project.Status == ProjectStatus.Published;
 
         if (project.Status is ProjectStatus.Published or ProjectStatus.PendingReview)
         {
@@ -123,13 +177,23 @@ public sealed class ProjectService(
         setting.RequiresNda = request.Visibility == ProjectVisibility.NdaRequired;
         setting.UpdatedAt = DateTimeOffset.UtcNow;
 
+        if (requiresModeration)
+        {
+            project.Status = ProjectStatus.PendingReview;
+            project.SubmittedAt = DateTimeOffset.UtcNow;
+        }
+
         await ReplaceRequiredRolesAsync(project.Id, request.RequiredRoles, cancellationToken);
         await ReplaceRequiredSkillsAsync(project.Id, request.RequiredSkillIds, cancellationToken);
 
-        AddAudit(userId, "Project.Update", "Project", project.Id);
+        AddAudit(userId, requiresModeration ? "Project.Update.SubmitReview" : "Project.Update", "Project", project.Id);
         AddActivity(project, userId, ActivityType.ProjectUpdated, GetProjectUpdateActivityVisibility(project.Status, request.Visibility), "Project updated", $"Project {project.Title} was updated.", "Project", project.Id);
         await dbContext.SaveChangesAsync(cancellationToken);
         await AddVersionAsync(project.Id, userId, "Project updated", cancellationToken);
+        if (requiresModeration)
+        {
+            await realtimeNotifier.ProjectStatusChangedAsync(project.Id, MapSummary(project), cancellationToken);
+        }
 
         return MapDetail(await GetProjectAggregateAsync(project.Id, cancellationToken));
     }
@@ -196,6 +260,7 @@ public sealed class ProjectService(
         var projects = await BaseProjectQuery()
             .Where(project => project.OwnerUserId == userId)
             .OrderByDescending(project => project.CreatedAt)
+            .Take(200)
             .ToArrayAsync(cancellationToken);
 
         return projects.Select(MapSummary).ToArray();
@@ -207,6 +272,7 @@ public sealed class ProjectService(
         var projects = await BaseProjectQuery()
             .Where(project => project.Members.Any(member => member.UserId == userId && member.IsActive))
             .OrderByDescending(project => project.CreatedAt)
+            .Take(200)
             .ToArrayAsync(cancellationToken);
 
         return projects.Select(MapSummary).ToArray();
@@ -220,6 +286,7 @@ public sealed class ProjectService(
         return await dbContext.ProjectVersions
             .Where(version => version.ProjectId == projectId)
             .OrderByDescending(version => version.VersionNumber)
+            .Take(200)
             .Select(version => new ProjectVersionDto(version.Id, version.VersionNumber, version.ChangeReason, version.CreatedAt))
             .ToArrayAsync(cancellationToken);
     }
@@ -261,10 +328,23 @@ public sealed class ProjectService(
     public async Task<IReadOnlyCollection<ProjectSummaryDto>> GetSavedProjectsAsync(ClaimsPrincipal principal, CancellationToken cancellationToken)
     {
         var userId = GetUserId(principal);
+        var now = DateTimeOffset.UtcNow;
         var projects = await BaseProjectQuery()
-            .Where(project => project.Status == ProjectStatus.Published &&
-                dbContext.SavedProjects.Any(saved => saved.UserId == userId && saved.ProjectId == project.Id))
+            .Where(project =>
+                dbContext.SavedProjects.Any(saved => saved.UserId == userId && saved.ProjectId == project.Id) &&
+                ((project.Status == ProjectStatus.Published &&
+                    dbContext.ProjectVisibilitySettings.Any(setting =>
+                        setting.ProjectId == project.Id &&
+                        (setting.Visibility == ProjectVisibility.Public || setting.Visibility == ProjectVisibility.Limited))) ||
+                 project.OwnerUserId == userId ||
+                 dbContext.ProjectMembers.Any(member =>
+                     member.ProjectId == project.Id && member.UserId == userId && member.IsActive) ||
+                 dbContext.ProjectAccessGrants.Any(grant =>
+                     grant.ProjectId == project.Id &&
+                     grant.UserId == userId &&
+                     (grant.ExpiresAt == null || grant.ExpiresAt > now))))
             .OrderByDescending(project => project.CreatedAt)
+            .Take(200)
             .ToArrayAsync(cancellationToken);
 
         return projects.Select(MapSummary).ToArray();
@@ -357,12 +437,19 @@ public sealed class ProjectService(
         foreach (var role in roles)
         {
             ValidateRequired(role.RoleName, "roleName", "Required role name is required");
+            ValidateMaximumLength(role.RoleName, 120, "roleName");
+            ValidateMaximumLength(role.Description, 1000, "description");
+            if (role.Slots is < 1 or > 50)
+            {
+                throw new ValidationException([new ErrorDetail("InvalidSlots", "Role slots must be between 1 and 50", "slots")]);
+            }
+
             dbContext.ProjectRequiredRoles.Add(new ProjectRequiredRole
             {
                 ProjectId = projectId,
                 RoleName = role.RoleName.Trim(),
                 Description = TrimOrNull(role.Description),
-                Slots = Math.Clamp(role.Slots, 1, 50),
+                Slots = role.Slots,
                 IsOpen = role.IsOpen
             });
         }
@@ -529,6 +616,7 @@ public sealed class ProjectService(
         ValidateRequired(request.Summary, "summary", "Project summary is required");
         ValidateRequired(request.Problem, "problem", "Project problem is required");
         ValidateRequired(request.Solution, "solution", "Project solution is required");
+        ValidateProjectText(request.Title, request.Summary, request.Problem, request.Solution);
     }
 
     private static void ValidateUpdate(UpdateProjectRequest request)
@@ -537,6 +625,38 @@ public sealed class ProjectService(
         ValidateRequired(request.Summary, "summary", "Project summary is required");
         ValidateRequired(request.Problem, "problem", "Project problem is required");
         ValidateRequired(request.Solution, "solution", "Project solution is required");
+        ValidateProjectText(request.Title, request.Summary, request.Problem, request.Solution);
+        ValidateMaximumLength(request.TargetMarket, 1000, "targetMarket");
+        ValidateMaximumLength(request.BusinessModel, 1000, "businessModel");
+        ValidateMaximumLength(request.FundingNeeds, 1000, "fundingNeeds");
+        ValidateMaximumLength(request.PitchDeckUrl, 500, "pitchDeckUrl");
+
+        if (request.RequiredRoles is null || request.RequiredSkillIds is null)
+        {
+            throw new ValidationException([new ErrorDetail("Required", "Required roles and skill IDs cannot be null", "requiredRoles")]);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.PitchDeckUrl) &&
+            (!Uri.TryCreate(request.PitchDeckUrl.Trim(), UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")))
+        {
+            throw new ValidationException([new ErrorDetail("InvalidUrl", "Pitch deck URL must be an absolute HTTP/HTTPS URL", "pitchDeckUrl")]);
+        }
+    }
+
+    private static void ValidateProjectText(string title, string summary, string problem, string solution)
+    {
+        ValidateMaximumLength(title, 180, "title");
+        ValidateMaximumLength(summary, 1000, "summary");
+        ValidateMaximumLength(problem, 3000, "problem");
+        ValidateMaximumLength(solution, 3000, "solution");
+    }
+
+    private static void ValidateMaximumLength(string? value, int maximum, string field)
+    {
+        if (!string.IsNullOrWhiteSpace(value) && value.Trim().Length > maximum)
+        {
+            throw new ValidationException([new ErrorDetail("TooLong", $"{field} must be at most {maximum} characters", field)]);
+        }
     }
 
     private static void ValidateRequired(string? value, string field, string message)

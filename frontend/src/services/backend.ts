@@ -69,8 +69,10 @@ export const backendService = {
     await api.post<ApiResponse<null>>("/auth/verify-email", request);
   },
 
-  async getCurrentUser() {
-    const { data } = await api.get<ApiResponse<AuthUserDto>>("/auth/me");
+  async getCurrentUser(options?: { allowAnonymous?: boolean }) {
+    const { data } = await api.get<ApiResponse<AuthUserDto>>("/auth/me", {
+      allowAnonymousFallback: options?.allowAnonymous,
+    });
     return data.data;
   },
 

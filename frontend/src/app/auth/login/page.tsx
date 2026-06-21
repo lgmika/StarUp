@@ -13,10 +13,11 @@ import { AuthShell } from "@/components/auth/auth-shell";
 import { getApiErrorMessage } from "@/lib/api";
 import { loginSchema, type LoginFormValues } from "@/lib/validations/auth";
 import { useAuthStore } from "@/stores/auth-store";
+import { getRoleHome } from "@/lib/permissions";
 
-function getRedirectTarget(next: string | null) {
+function getRedirectTarget(next: string | null, roles: string[]) {
   if (next?.startsWith("/") && !next.startsWith("//")) return next;
-  return "/";
+  return getRoleHome(roles);
 }
 
 export default function LoginPage() {
@@ -44,8 +45,8 @@ function LoginForm() {
   async function onSubmit(values: LoginFormValues) {
     setError(null);
     try {
-      await login(values);
-      router.replace(getRedirectTarget(searchParams.get("next")));
+      const user = await login(values);
+      router.replace(getRedirectTarget(searchParams.get("next"), user.roles));
       router.refresh();
     } catch (submitError) {
       setError(getApiErrorMessage(submitError));

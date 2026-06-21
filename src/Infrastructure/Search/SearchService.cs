@@ -64,7 +64,6 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
 
         if (!string.IsNullOrWhiteSpace(keyword))
         {
-            var tsQuery = EF.Functions.PlainToTsQuery("english", keyword);
             projects = projects.Where(project =>
                 EF.Functions.ToTsVector(
                     "english",
@@ -75,12 +74,13 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
                     (project.TargetMarket ?? string.Empty) + " " +
                     (project.BusinessModel ?? string.Empty) + " " +
                     (project.FundingNeeds ?? string.Empty))
-                .Matches(tsQuery));
+                .Matches(EF.Functions.PlainToTsQuery("english", keyword)));
         }
 
-        var ranked = projects.Select(project => new ProjectSearchProjection(
-            project,
-            !string.IsNullOrWhiteSpace(keyword)
+        var ranked = projects.Select(project => new
+        {
+            Project = project,
+            Rank = !string.IsNullOrWhiteSpace(keyword)
                 ? EF.Functions.ToTsVector(
                     "english",
                     project.Title + " " +
@@ -91,7 +91,8 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
                     (project.BusinessModel ?? string.Empty) + " " +
                     (project.FundingNeeds ?? string.Empty))
                     .Rank(EF.Functions.PlainToTsQuery("english", keyword))
-                : 0));
+                : 0
+        });
 
         ranked = (query.Sort ?? "relevance").Trim().ToLowerInvariant() switch
         {
@@ -104,7 +105,7 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
 
         var total = await ranked.CountAsync(cancellationToken);
         var rows = await ranked
-            .Skip((page - 1) * pageSize)
+            .Skip(Pagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .Select(item => new
             {
@@ -169,15 +170,14 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
 
         if (!string.IsNullOrWhiteSpace(query.Location))
         {
-            var locationQuery = EF.Functions.PlainToTsQuery("english", query.Location.Trim());
             profiles = profiles.Where(profile =>
                 profile.Location != null &&
-                EF.Functions.ToTsVector("english", profile.Location).Matches(locationQuery));
+                EF.Functions.ToTsVector("english", profile.Location)
+                    .Matches(EF.Functions.PlainToTsQuery("english", query.Location.Trim())));
         }
 
         if (!string.IsNullOrWhiteSpace(keyword))
         {
-            var tsQuery = EF.Functions.PlainToTsQuery("english", keyword);
             profiles = profiles.Where(profile =>
                 EF.Functions.ToTsVector(
                     "english",
@@ -185,13 +185,14 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
                     profile.Headline + " " +
                     profile.Bio + " " +
                     (profile.Location ?? string.Empty))
-                .Matches(tsQuery));
+                .Matches(EF.Functions.PlainToTsQuery("english", keyword)));
         }
 
         var ranked = profiles
-            .Select(profile => new MemberSearchProjection(
-                profile,
-                !string.IsNullOrWhiteSpace(keyword)
+            .Select(profile => new
+            {
+                Profile = profile,
+                Rank = !string.IsNullOrWhiteSpace(keyword)
                     ? EF.Functions.ToTsVector(
                         "english",
                         profile.User.FullName + " " +
@@ -199,13 +200,14 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
                         profile.Bio + " " +
                         (profile.Location ?? string.Empty))
                         .Rank(EF.Functions.PlainToTsQuery("english", keyword))
-                    : 0))
+                    : 0
+            })
             .OrderByDescending(item => item.Rank)
             .ThenBy(item => item.Profile.User.FullName);
 
         var total = await ranked.CountAsync(cancellationToken);
         var rows = await ranked
-            .Skip((page - 1) * pageSize)
+            .Skip(Pagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .Select(item => new
             {
@@ -255,8 +257,8 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
         var skills = dbContext.Skills.AsQueryable();
         if (!string.IsNullOrWhiteSpace(keyword))
         {
-            var tsQuery = EF.Functions.PlainToTsQuery("english", keyword);
-            skills = skills.Where(skill => EF.Functions.ToTsVector("english", skill.Name).Matches(tsQuery));
+            skills = skills.Where(skill => EF.Functions.ToTsVector("english", skill.Name)
+                .Matches(EF.Functions.PlainToTsQuery("english", keyword)));
         }
 
         items.AddRange(await skills
@@ -271,9 +273,9 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
             var projects = ApplyProjectVisibility(dbContext.Projects.Where(project => !project.IsDeleted), userId);
             if (!string.IsNullOrWhiteSpace(keyword))
             {
-                var tsQuery = EF.Functions.PlainToTsQuery("english", keyword);
                 projects = projects.Where(project =>
-                    EF.Functions.ToTsVector("english", project.Title + " " + project.Summary).Matches(tsQuery));
+                    EF.Functions.ToTsVector("english", project.Title + " " + project.Summary)
+                        .Matches(EF.Functions.PlainToTsQuery("english", keyword)));
             }
 
             items.AddRange(await projects
@@ -312,7 +314,6 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
 
         if (!string.IsNullOrWhiteSpace(keyword))
         {
-            var tsQuery = EF.Functions.PlainToTsQuery("english", keyword);
             investors = investors.Where(profile =>
                 EF.Functions.ToTsVector(
                     "english",
@@ -320,13 +321,14 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
                     (profile.OrganizationName ?? string.Empty) + " " +
                     (profile.Bio ?? string.Empty) + " " +
                     (profile.InvestmentFocus ?? string.Empty))
-                .Matches(tsQuery));
+                .Matches(EF.Functions.PlainToTsQuery("english", keyword)));
         }
 
         var ranked = investors
-            .Select(profile => new InvestorSearchProjection(
-                profile,
-                !string.IsNullOrWhiteSpace(keyword)
+            .Select(profile => new
+            {
+                Profile = profile,
+                Rank = !string.IsNullOrWhiteSpace(keyword)
                     ? EF.Functions.ToTsVector(
                         "english",
                         profile.DisplayName + " " +
@@ -334,13 +336,14 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
                         (profile.Bio ?? string.Empty) + " " +
                         (profile.InvestmentFocus ?? string.Empty))
                         .Rank(EF.Functions.PlainToTsQuery("english", keyword))
-                    : 0))
+                    : 0
+            })
             .OrderByDescending(item => item.Rank)
             .ThenBy(item => item.Profile.DisplayName);
 
         var total = await ranked.CountAsync(cancellationToken);
         var items = await ranked
-            .Skip((page - 1) * pageSize)
+            .Skip(Pagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .Select(item => new InvestorSearchItemDto(
                 item.Profile.UserId,
@@ -407,9 +410,4 @@ public sealed class SearchService(AppDbContext dbContext) : ISearchService
         throw new ApiException("Investor search requires an investor, business, moderator, or admin role", HttpStatusCode.Forbidden);
     }
 
-    private sealed record ProjectSearchProjection(Project Project, float Rank);
-
-    private sealed record MemberSearchProjection(UserProfile Profile, float Rank);
-
-    private sealed record InvestorSearchProjection(InvestorProfile Profile, float Rank);
 }

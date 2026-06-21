@@ -157,7 +157,7 @@ public sealed class ProfileService(
     public async Task<CvDto> CreateCvAsync(ClaimsPrincipal principal, CreateCvRequest request, CancellationToken cancellationToken)
     {
         var userId = GetUserId(principal);
-        ValidateCv(request.Title);
+        ValidateCv(request.Title, request.Summary);
 
         if (request.IsDefault)
         {
@@ -217,7 +217,7 @@ public sealed class ProfileService(
     public async Task<CvDto> UpdateCvAsync(ClaimsPrincipal principal, Guid cvId, UpdateCvRequest request, CancellationToken cancellationToken)
     {
         var userId = GetUserId(principal);
-        ValidateCv(request.Title);
+        ValidateCv(request.Title, request.Summary);
 
         var cv = await dbContext.CVs.Include(item => item.File)
             .FirstOrDefaultAsync(item => item.Id == cvId && item.UserId == userId && !item.IsDeleted, cancellationToken)
@@ -269,6 +269,9 @@ public sealed class ProfileService(
         var userId = GetUserId(principal);
         ValidateRequired(request.Title, "title", "Portfolio title is required");
         ValidateRequired(request.Url, "url", "Portfolio URL is required");
+        ValidateMaximumLength(request.Title, 160, "title");
+        ValidateMaximumLength(request.Url, 500, "url");
+        ValidateMaximumLength(request.Description, 1000, "description");
 
         if (!Uri.TryCreate(request.Url, UriKind.Absolute, out var uri) ||
             uri.Scheme is not ("http" or "https"))
@@ -400,15 +403,43 @@ public sealed class ProfileService(
         {
             throw new ValidationException([new ErrorDetail("BioTooLong", "Bio must be at most 2000 characters", "bio")]);
         }
+
+        ValidateMaximumLength(request.Location, 160, "location");
+        ValidateMaximumLength(request.PhoneNumber, 40, "phoneNumber");
+        ValidateMaximumLength(request.LinkedInUrl, 500, "linkedInUrl");
+        ValidateMaximumLength(request.GitHubUrl, 500, "gitHubUrl");
+        ValidateMaximumLength(request.WebsiteUrl, 500, "websiteUrl");
+        ValidateOptionalUrl(request.LinkedInUrl, "linkedInUrl");
+        ValidateOptionalUrl(request.GitHubUrl, "gitHubUrl");
+        ValidateOptionalUrl(request.WebsiteUrl, "websiteUrl");
     }
 
-    private static void ValidateCv(string title)
+    private static void ValidateCv(string title, string? summary)
     {
         ValidateRequired(title, "title", "CV title is required");
 
         if (title.Trim().Length > 160)
         {
             throw new ValidationException([new ErrorDetail("TitleTooLong", "CV title must be at most 160 characters", "title")]);
+        }
+
+        ValidateMaximumLength(summary, 2000, "summary");
+    }
+
+    private static void ValidateMaximumLength(string? value, int maximum, string field)
+    {
+        if (!string.IsNullOrWhiteSpace(value) && value.Trim().Length > maximum)
+        {
+            throw new ValidationException([new ErrorDetail("TooLong", $"{field} must be at most {maximum} characters", field)]);
+        }
+    }
+
+    private static void ValidateOptionalUrl(string? value, string field)
+    {
+        if (!string.IsNullOrWhiteSpace(value) &&
+            (!Uri.TryCreate(value.Trim(), UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")))
+        {
+            throw new ValidationException([new ErrorDetail("InvalidUrl", $"{field} must be an absolute HTTP/HTTPS URL", field)]);
         }
     }
 

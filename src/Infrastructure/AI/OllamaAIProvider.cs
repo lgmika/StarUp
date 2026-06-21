@@ -4,7 +4,9 @@ using Microsoft.Extensions.Options;
 
 namespace StartupConnect.Infrastructure.AI;
 
-public sealed class OllamaAIProvider(IOptions<AIOptions> options) : IAIProvider
+public sealed class OllamaAIProvider(
+    IOptions<AIOptions> options,
+    OllamaHttpClient httpClient) : IAIProvider
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly AIOptions _options = options.Value;
@@ -83,12 +85,6 @@ public sealed class OllamaAIProvider(IOptions<AIOptions> options) : IAIProvider
     private async Task<string> GenerateTextAsync(string prompt, bool jsonMode, CancellationToken cancellationToken)
     {
         var settings = _options.Ollama;
-        using var client = new HttpClient
-        {
-            BaseAddress = new Uri(settings.BaseUrl.TrimEnd('/') + "/"),
-            Timeout = TimeSpan.FromSeconds(settings.TimeoutSeconds)
-        };
-
         var request = new Dictionary<string, object?>
         {
             ["model"] = settings.Model,
@@ -102,7 +98,7 @@ public sealed class OllamaAIProvider(IOptions<AIOptions> options) : IAIProvider
             request["format"] = "json";
         }
 
-        using var response = await client.PostAsJsonAsync("api/generate", request, JsonOptions, cancellationToken);
+        using var response = await httpClient.Client.PostAsJsonAsync("api/generate", request, JsonOptions, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         var payload = await response.Content.ReadFromJsonAsync<OllamaGenerateResponse>(JsonOptions, cancellationToken)

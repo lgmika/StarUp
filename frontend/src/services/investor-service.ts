@@ -4,12 +4,17 @@ import type { AITextResponse } from "@/types/ai";
 import type {
   CreateInvestorInterestRequest,
   InvestorInterestDto,
+  InvestorDashboardDto,
   InvestorProjectDiscoveryDto,
   InvestorProfileDto,
   UpsertInvestorProfileRequest,
 } from "@/types/investor";
 
 export const investorService = {
+  async getDashboard() {
+    const { data } = await api.get<ApiResponse<InvestorDashboardDto>>("/investors/me/dashboard", { params: { timezoneOffsetMinutes: new Date().getTimezoneOffset() } });
+    return data.data;
+  },
   async getMyProfile() {
     const { data } = await api.get<ApiResponse<InvestorProfileDto>>("/investors/me/profile", {
       skipForbiddenRedirect: true,

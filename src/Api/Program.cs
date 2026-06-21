@@ -36,6 +36,20 @@ builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.Configure<StartupConnectSecurityOptions>(builder.Configuration.GetSection("Security"));
 builder.Services.Configure<ApiRateLimitOptions>(builder.Configuration.GetSection("RateLimiting"));
 SecurityConfigurationValidator.Validate(builder.Configuration, builder.Environment);
+var configuredSecurityOptions = builder.Configuration.GetSection("Security").Get<StartupConnectSecurityOptions>() ?? new StartupConnectSecurityOptions();
+
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.AddServerHeader = false;
+    options.Limits.MaxRequestBodySize = configuredSecurityOptions.MaxRequestBodySizeBytes;
+});
+
+builder.Services.AddHsts(options =>
+{
+    options.MaxAge = TimeSpan.FromDays(configuredSecurityOptions.HstsMaxAgeDays);
+    options.IncludeSubDomains = true;
+    options.Preload = true;
+});
 
 // CORS
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ??
@@ -59,7 +73,7 @@ builder.Services.AddCors(options =>
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
-    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(allowIntegerValues: false));
 });
 builder.Services.AddOpenApi();
 builder.Services.AddSignalR();
@@ -130,6 +144,18 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
         if (System.Net.IPAddress.TryParse(proxy, out var address))
         {
             options.KnownProxies.Add(address);
+        }
+    }
+
+    var knownNetworks = builder.Configuration.GetSection("Security:KnownNetworks").Get<string[]>() ?? [];
+    foreach (var network in knownNetworks)
+    {
+        var separator = network.LastIndexOf('/');
+        if (separator > 0 &&
+            System.Net.IPAddress.TryParse(network[..separator], out var prefix) &&
+            int.TryParse(network[(separator + 1)..], out var prefixLength))
+        {
+            options.KnownIPNetworks.Add(new System.Net.IPNetwork(prefix, prefixLength));
         }
     }
 });
@@ -208,8 +234,14 @@ builder.Services
 var app = builder.Build();
 var securityOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<StartupConnectSecurityOptions>>().Value;
 
-app.UseMiddleware<GlobalExceptionMiddleware>();
+if (securityOptions.UseForwardedHeaders)
+{
+    app.UseForwardedHeaders();
+}
+
 app.UseMiddleware<RequestLoggingMiddleware>();
+app.UseMiddleware<GlobalExceptionMiddleware>();
+app.UseMiddleware<SecurityHeadersMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {
@@ -223,13 +255,13 @@ if (app.Environment.IsDevelopment())
     });
 }
 
-if (securityOptions.UseForwardedHeaders)
-{
-    app.UseForwardedHeaders();
-}
-
 if (!app.Environment.IsDevelopment() && securityOptions.RequireHttpsRedirection)
 {
+    if (securityOptions.EnableHsts)
+    {
+        app.UseHsts();
+    }
+
     app.UseHttpsRedirection();
 }
 
@@ -242,6 +274,7 @@ app.MapHealthChecks("/api/v1/health", new HealthCheckOptions
 {
     ResponseWriter = HealthCheckExtensions.WriteStartupConnectHealthResponse
 })
+.DisableRateLimiting()
 .WithName("HealthCheck");
 
 app.MapHealthChecks("/api/v1/health/live", new HealthCheckOptions
@@ -249,12 +282,14 @@ app.MapHealthChecks("/api/v1/health/live", new HealthCheckOptions
     Predicate = _ => false,
     ResponseWriter = HealthCheckExtensions.WriteStartupConnectHealthResponse
 })
+.DisableRateLimiting()
 .WithName("LivenessHealthCheck");
 
 app.MapHealthChecks("/api/v1/health/ready", new HealthCheckOptions
 {
     ResponseWriter = HealthCheckExtensions.WriteStartupConnectHealthResponse
 })
+.DisableRateLimiting()
 .WithName("ReadinessHealthCheck");
 
 app.MapStartupConnectEndpoints();

@@ -1,7 +1,13 @@
 using System.Net;
 using System.Security.Claims;
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Npgsql;
 using StartupConnect.Application.Realtime;
+using StartupConnect.Application.Admin.Interfaces;
 using StartupConnect.Application.Realtime.Interfaces;
 using StartupConnect.Application.Subscriptions.Dtos;
 using StartupConnect.Application.Subscriptions.Interfaces;
@@ -15,7 +21,9 @@ namespace StartupConnect.Infrastructure.Subscriptions;
 public sealed class SubscriptionService(
     AppDbContext dbContext,
     IPaymentProvider paymentProvider,
-    IRealtimeNotifier realtimeNotifier) : ISubscriptionService
+    IRealtimeNotifier realtimeNotifier,
+    ISystemSettingReader systemSettingReader,
+    ILogger<SubscriptionService> logger) : ISubscriptionService
 {
     public async Task<IReadOnlyCollection<SubscriptionPlanDto>> GetPlansAsync(CancellationToken cancellationToken)
     {
@@ -36,6 +44,8 @@ public sealed class SubscriptionService(
 
     public async Task<CheckoutResponse> CreateCheckoutAsync(ClaimsPrincipal principal, CheckoutRequest request, CancellationToken cancellationToken)
     {
+        await EnsureFeatureEnabledAsync("Subscriptions.Enabled", "Subscriptions are temporarily disabled", cancellationToken);
+        await EnsureFeatureEnabledAsync("Payments.CheckoutEnabled", "Payment checkout is temporarily disabled", cancellationToken);
         var userId = GetUserId(principal);
         var plan = await dbContext.SubscriptionPlans.FirstOrDefaultAsync(item => item.Id == request.PlanId && item.IsActive, cancellationToken)
             ?? throw new ApiException("Subscription plan not found", HttpStatusCode.NotFound);
@@ -58,6 +68,7 @@ public sealed class SubscriptionService(
         };
 
         dbContext.PaymentTransactions.Add(transaction);
+        AddAudit(userId, "Payment.Checkout.Created", "PaymentTransaction", transaction.Id, paymentProvider.Name);
         await dbContext.SaveChangesAsync(cancellationToken);
 
         return new CheckoutResponse(transaction.Id, paymentProvider.Name, session.SessionId, session.CheckoutUrl);
@@ -65,13 +76,21 @@ public sealed class SubscriptionService(
 
     public async Task<SubscriptionDto> CancelAsync(ClaimsPrincipal principal, CancellationToken cancellationToken)
     {
+        await EnsureFeatureEnabledAsync("Subscriptions.Enabled", "Subscriptions are temporarily disabled", cancellationToken);
         var userId = GetUserId(principal);
         var subscription = await GetCurrentSubscriptionAsync(userId, cancellationToken);
+        if (subscription.Plan.Code.Equals("Free", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ApiException("Free subscription cannot be cancelled", HttpStatusCode.BadRequest);
+        }
+
         if (subscription.Status is SubscriptionStatus.Active or SubscriptionStatus.Trialing or SubscriptionStatus.PastDue)
         {
+            await paymentProvider.CancelSubscriptionAsync(subscription.ProviderSubscriptionId, cancellationToken);
             subscription.Status = SubscriptionStatus.Cancelled;
             subscription.CancelledAt = DateTimeOffset.UtcNow;
             subscription.UpdatedAt = DateTimeOffset.UtcNow;
+            AddAudit(userId, "Payment.Subscription.CancelRequested", "UserSubscription", subscription.Id, paymentProvider.Name);
             await dbContext.SaveChangesAsync(cancellationToken);
         }
 
@@ -80,13 +99,16 @@ public sealed class SubscriptionService(
 
     public async Task<SubscriptionDto> ResumeAsync(ClaimsPrincipal principal, CancellationToken cancellationToken)
     {
+        await EnsureFeatureEnabledAsync("Subscriptions.Enabled", "Subscriptions are temporarily disabled", cancellationToken);
         var userId = GetUserId(principal);
         var subscription = await GetCurrentSubscriptionAsync(userId, cancellationToken);
         if (subscription.Status == SubscriptionStatus.Cancelled && subscription.CurrentPeriodEnd > DateTimeOffset.UtcNow)
         {
+            await paymentProvider.ResumeSubscriptionAsync(subscription.ProviderSubscriptionId, cancellationToken);
             subscription.Status = SubscriptionStatus.Active;
             subscription.CancelledAt = null;
             subscription.UpdatedAt = DateTimeOffset.UtcNow;
+            AddAudit(userId, "Payment.Subscription.ResumeRequested", "UserSubscription", subscription.Id, paymentProvider.Name);
             await dbContext.SaveChangesAsync(cancellationToken);
         }
 
@@ -110,40 +132,120 @@ public sealed class SubscriptionService(
             throw new ApiException(exception.Message, HttpStatusCode.BadRequest);
         }
 
-        var duplicate = await dbContext.PaymentWebhookEvents.AnyAsync(
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await AcquireWebhookLockAsync(payload.EventId, cancellationToken);
+
+        var existingWebhook = await dbContext.PaymentWebhookEvents.FirstOrDefaultAsync(
             item => item.Provider == paymentProvider.Name && item.ProviderEventId == payload.EventId,
             cancellationToken);
-        if (duplicate)
+        if (existingWebhook?.IsProcessed == true)
         {
+            await transaction.CommitAsync(cancellationToken);
             return new PaymentWebhookResult(payload.EventId, payload.Type, Processed: false, Duplicate: true);
         }
 
-        var webhook = new PaymentWebhookEvent
+        var webhook = existingWebhook ?? new PaymentWebhookEvent
         {
             Provider = paymentProvider.Name,
-            ProviderEventId = payload.EventId,
-            EventType = payload.Type,
-            PayloadJson = payloadJson
+            ProviderEventId = payload.EventId
         };
-        dbContext.PaymentWebhookEvents.Add(webhook);
+        webhook.EventType = payload.Type;
+        webhook.PayloadJson = payloadJson;
+        webhook.IsProcessed = false;
+        webhook.ProcessedAt = null;
+        webhook.ProcessingError = null;
+        if (existingWebhook is null)
+        {
+            dbContext.PaymentWebhookEvents.Add(webhook);
+        }
 
+        Guid? affectedUserId;
         try
         {
-            await ApplyWebhookAsync(payload, cancellationToken);
+            affectedUserId = await ApplyWebhookAsync(payload, cancellationToken);
             webhook.IsProcessed = true;
             webhook.ProcessedAt = DateTimeOffset.UtcNow;
             await dbContext.SaveChangesAsync(cancellationToken);
-            return new PaymentWebhookResult(payload.EventId, payload.Type, Processed: true, Duplicate: false);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsDuplicateWebhookConflict(exception))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            dbContext.ChangeTracker.Clear();
+            return new PaymentWebhookResult(payload.EventId, payload.Type, Processed: false, Duplicate: true);
         }
         catch (Exception exception)
         {
-            webhook.ProcessingError = exception.Message;
-            await dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.RollbackAsync(cancellationToken);
+            dbContext.ChangeTracker.Clear();
+            await StoreWebhookFailureAsync(payload, payloadJson, exception.Message, cancellationToken);
             throw;
+        }
+
+        await NotifyWebhookSubscriptionChangedAsync(affectedUserId);
+        return new PaymentWebhookResult(payload.EventId, payload.Type, Processed: true, Duplicate: false);
+    }
+
+    private async Task AcquireWebhookLockAsync(string eventId, CancellationToken cancellationToken)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{paymentProvider.Name}:{eventId}"));
+        var lockKey = BinaryPrimitives.ReadInt64BigEndian(bytes);
+        await dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT pg_advisory_xact_lock({lockKey})",
+            cancellationToken);
+    }
+
+    private async Task StoreWebhookFailureAsync(
+        PaymentProviderWebhookPayload payload,
+        string payloadJson,
+        string error,
+        CancellationToken cancellationToken)
+    {
+        var webhook = await dbContext.PaymentWebhookEvents.FirstOrDefaultAsync(
+            item => item.Provider == paymentProvider.Name && item.ProviderEventId == payload.EventId,
+            cancellationToken);
+
+        if (webhook?.IsProcessed == true)
+        {
+            return;
+        }
+
+        webhook ??= new PaymentWebhookEvent
+        {
+            Provider = paymentProvider.Name,
+            ProviderEventId = payload.EventId
+        };
+        webhook.EventType = payload.Type;
+        webhook.PayloadJson = payloadJson;
+        webhook.IsProcessed = false;
+        webhook.ProcessedAt = null;
+        webhook.ProcessingError = error.Length <= 1000 ? error : error[..1000];
+
+        if (dbContext.Entry(webhook).State == EntityState.Detached)
+        {
+            dbContext.PaymentWebhookEvents.Add(webhook);
+        }
+
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsDuplicateWebhookConflict(exception))
+        {
+            dbContext.ChangeTracker.Clear();
         }
     }
 
-    private async Task ApplyWebhookAsync(PaymentProviderWebhookPayload payload, CancellationToken cancellationToken)
+    private static bool IsDuplicateWebhookConflict(DbUpdateException exception)
+    {
+        return exception.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.UniqueViolation,
+            ConstraintName: "IX_payment_webhook_events_Provider_ProviderEventId"
+        };
+    }
+
+    private async Task<Guid?> ApplyWebhookAsync(PaymentProviderWebhookPayload payload, CancellationToken cancellationToken)
     {
         if (payload.Type is "checkout.completed" or "subscription.updated")
         {
@@ -174,39 +276,81 @@ public sealed class SubscriptionService(
             }
 
             AddAudit(userId, "Payment.Webhook.SubscriptionUpdated", "UserSubscription", subscription.Id, payload.Type);
-            await realtimeNotifier.NotifyUserAsync(
-                userId,
-                RealtimeEventNames.BillingSubscriptionChanged,
-                await MapSubscriptionAsync(subscription, cancellationToken),
-                cancellationToken);
+            return userId;
         }
-        else if (payload.Type == "invoice.payment_failed")
+
+        if (payload.Type == "invoice.payment_failed")
         {
-            await UpdateStatusAsync(payload, SubscriptionStatus.PastDue, cancellationToken);
+            return await UpdateStatusAsync(payload, SubscriptionStatus.PastDue, cancellationToken);
         }
-        else if (payload.Type == "subscription.cancelled")
+
+        if (payload.Type == "subscription.cancelled")
         {
-            await UpdateStatusAsync(payload, SubscriptionStatus.Cancelled, cancellationToken);
+            return await UpdateStatusAsync(payload, SubscriptionStatus.Cancelled, cancellationToken);
         }
+
+        return null;
     }
 
-    private async Task UpdateStatusAsync(PaymentProviderWebhookPayload payload, SubscriptionStatus status, CancellationToken cancellationToken)
+    private async Task<Guid> UpdateStatusAsync(PaymentProviderWebhookPayload payload, SubscriptionStatus status, CancellationToken cancellationToken)
     {
-        if (payload.UserId is null)
+        UserSubscription? subscription = null;
+        if (payload.UserId is not null)
         {
-            throw new ApiException("Webhook user id is required", HttpStatusCode.BadRequest);
+            subscription = await GetCurrentSubscriptionAsync(payload.UserId.Value, cancellationToken);
+        }
+        else if (!string.IsNullOrWhiteSpace(payload.ProviderSubscriptionId))
+        {
+            subscription = await dbContext.UserSubscriptions
+                .Include(item => item.Plan)
+                .FirstOrDefaultAsync(
+                    item => item.Provider == paymentProvider.Name &&
+                        item.ProviderSubscriptionId == payload.ProviderSubscriptionId,
+                    cancellationToken);
         }
 
-        var subscription = await GetCurrentSubscriptionAsync(payload.UserId.Value, cancellationToken);
+        if (subscription is null)
+        {
+            throw new ApiException("Webhook subscription could not be resolved", HttpStatusCode.BadRequest);
+        }
+
+        var userId = subscription.UserId;
+
         subscription.Status = status;
         subscription.CancelledAt = status == SubscriptionStatus.Cancelled ? DateTimeOffset.UtcNow : subscription.CancelledAt;
         subscription.UpdatedAt = DateTimeOffset.UtcNow;
-        AddAudit(payload.UserId.Value, $"Payment.Webhook.{status}", "UserSubscription", subscription.Id, payload.Type);
-        await realtimeNotifier.NotifyUserAsync(
-            payload.UserId.Value,
-            RealtimeEventNames.BillingSubscriptionChanged,
-            await MapSubscriptionAsync(subscription, cancellationToken),
-            cancellationToken);
+        AddAudit(userId, $"Payment.Webhook.{status}", "UserSubscription", subscription.Id, payload.Type);
+        return userId;
+    }
+
+    private async Task NotifyWebhookSubscriptionChangedAsync(Guid? userId)
+    {
+        if (userId is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var subscription = await GetCurrentSubscriptionAsync(userId.Value, CancellationToken.None);
+            await realtimeNotifier.NotifyUserAsync(
+                userId.Value,
+                RealtimeEventNames.BillingSubscriptionChanged,
+                await MapSubscriptionAsync(subscription, CancellationToken.None),
+                CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Payment webhook committed but realtime notification failed for user {UserId}.", userId);
+        }
+    }
+
+    private async Task EnsureFeatureEnabledAsync(string key, string message, CancellationToken cancellationToken)
+    {
+        if (!await systemSettingReader.GetBooleanAsync(key, true, cancellationToken))
+        {
+            throw new ApiException(message, HttpStatusCode.ServiceUnavailable);
+        }
     }
 
     private async Task<UserSubscription> GetCurrentSubscriptionAsync(Guid userId, CancellationToken cancellationToken)

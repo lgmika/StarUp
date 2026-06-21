@@ -113,6 +113,20 @@ public static class DependencyInjection
         });
         services.AddScoped<DevelopmentEmailService>();
         services.AddScoped<SmtpEmailService>();
+        services.Configure<EmailOutboxOptions>(options =>
+        {
+            options.Enabled = !bool.TryParse(configuration["Email:Outbox:Enabled"], out var enabled) || enabled;
+            options.PollSeconds = int.TryParse(configuration["Email:Outbox:PollSeconds"], out var pollSeconds) ? pollSeconds : 5;
+            options.BatchSize = int.TryParse(configuration["Email:Outbox:BatchSize"], out var batchSize) ? batchSize : 50;
+            options.MaxAttempts = int.TryParse(configuration["Email:Outbox:MaxAttempts"], out var maxAttempts) ? maxAttempts : 10;
+            options.LeaseSeconds = int.TryParse(configuration["Email:Outbox:LeaseSeconds"], out var leaseSeconds) ? leaseSeconds : 600;
+            options.EncryptionKey = configuration["Email:Outbox:EncryptionKey"] ??
+                configuration["Jwt:SigningKey"] ??
+                string.Empty;
+        });
+        services.AddSingleton<EmailOutboxProtector>();
+        services.AddScoped<EmailOutboxDispatcher>();
+        services.AddHostedService<EmailOutboxWorker>();
         services.Configure<FileStorageOptions>(options =>
         {
             options.Provider = configuration["FileStorage:Provider"] ?? "Local";
@@ -163,7 +177,6 @@ public static class DependencyInjection
             options.ApiKey = configuration["Payments:ApiKey"] ?? string.Empty;
         });
         services.AddScoped<MockPaymentProvider>();
-        services.AddScoped<ConfiguredPaymentProvider>();
         services.AddScoped<StripePaymentProvider>();
         services.AddScoped<IPaymentProvider>(serviceProvider =>
         {
@@ -178,7 +191,7 @@ public static class DependencyInjection
                 return serviceProvider.GetRequiredService<StripePaymentProvider>();
             }
 
-            return serviceProvider.GetRequiredService<ConfiguredPaymentProvider>();
+            throw new InvalidOperationException($"Payment provider '{options.Provider}' is not configured in this build.");
         });
         services.AddScoped<ISubscriptionService, SubscriptionService>();
         services.AddScoped<IAuthService, AuthService>();
@@ -195,13 +208,22 @@ public static class DependencyInjection
                 : 120;
         });
         services.AddScoped<MockAIProvider>();
+        services.AddSingleton<OllamaHttpClient>();
         services.AddScoped<OllamaAIProvider>();
         services.AddScoped<IAIProvider>(serviceProvider =>
         {
             var options = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<AIOptions>>().Value;
-            return options.Provider.Equals("Ollama", StringComparison.OrdinalIgnoreCase)
-                ? serviceProvider.GetRequiredService<OllamaAIProvider>()
-                : serviceProvider.GetRequiredService<MockAIProvider>();
+            if (options.Provider.Equals("Mock", StringComparison.OrdinalIgnoreCase))
+            {
+                return serviceProvider.GetRequiredService<MockAIProvider>();
+            }
+
+            if (options.Provider.Equals("Ollama", StringComparison.OrdinalIgnoreCase))
+            {
+                return serviceProvider.GetRequiredService<OllamaAIProvider>();
+            }
+
+            throw new InvalidOperationException($"AI provider '{options.Provider}' is not configured in this build.");
         });
         services.AddScoped<IAIService, AIService>();
         services.AddScoped<IModeratorService, ModeratorService>();
@@ -211,6 +233,7 @@ public static class DependencyInjection
         services.AddScoped<INotificationService, NotificationService>();
         services.AddScoped<IReportService, ReportService>();
         services.AddScoped<IAdminService, AdminService>();
+        services.AddScoped<ISystemSettingReader, SystemSettingReader>();
         services.AddScoped<IProjectTeamService, ProjectTeamService>();
         services.AddScoped<IInterviewService, InterviewService>();
         services.AddScoped<IChatService, ChatService>();
@@ -231,6 +254,18 @@ public static class DependencyInjection
             options.BatchSize = int.TryParse(configuration["BackgroundJobs:BatchSize"], out var batchSize)
                 ? batchSize
                 : 100;
+            options.EmailOutboxRetentionDays = int.TryParse(configuration["BackgroundJobs:EmailOutboxRetentionDays"], out var outboxRetentionDays)
+                ? outboxRetentionDays
+                : 30;
+            options.FailedEmailOutboxRetentionDays = int.TryParse(configuration["BackgroundJobs:FailedEmailOutboxRetentionDays"], out var failedOutboxRetentionDays)
+                ? failedOutboxRetentionDays
+                : 90;
+            options.ExecutionRetentionDays = int.TryParse(configuration["BackgroundJobs:ExecutionRetentionDays"], out var executionRetentionDays)
+                ? executionRetentionDays
+                : 90;
+            options.RefreshTokenRetentionDays = int.TryParse(configuration["BackgroundJobs:RefreshTokenRetentionDays"], out var refreshTokenRetentionDays)
+                ? refreshTokenRetentionDays
+                : 30;
             options.MaintenanceLockKey = long.TryParse(configuration["BackgroundJobs:MaintenanceLockKey"], out var lockKey)
                 ? lockKey
                 : 25061225;

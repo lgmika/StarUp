@@ -79,6 +79,13 @@ export enum ProjectMemberRole {
 export enum NotificationType {
   ProjectModeration = 'ProjectModeration',
   System = 'System',
+  Application = 'Application',
+  InvestorInterest = 'InvestorInterest',
+  Chat = 'Chat',
+  Report = 'Report',
+  NDA = 'NDA',
+  Interview = 'Interview',
+  Billing = 'Billing',
 }
 
 export enum ReportStatus {

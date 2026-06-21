@@ -151,3 +151,29 @@ public sealed record AdminUsageQuotaRequest(
     string ResourceKey,
     int Limit,
     string? Reason = null);
+
+public sealed record AdminEmailOutboxDto(
+    Guid Id,
+    string Recipient,
+    string Template,
+    string Status,
+    int Attempts,
+    DateTimeOffset NextAttemptAt,
+    DateTimeOffset? LockedUntil,
+    DateTimeOffset? SentAt,
+    string? LastError,
+    DateTimeOffset CreatedAt);
+
+public sealed record AdminEmailOutboxListResponse(
+    IReadOnlyCollection<AdminEmailOutboxDto> Items,
+    int Total,
+    int Page,
+    int PageSize);
+
+public sealed record AdminEmailOutboxQuery(
+    string? Status = null,
+    string? Recipient = null,
+    int Page = 1,
+    int PageSize = 20);
+
+public sealed record AdminRetryEmailRequest(string? Reason = null);

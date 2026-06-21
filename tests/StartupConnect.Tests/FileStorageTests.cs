@@ -44,4 +44,29 @@ public sealed class FileStorageTests
         Assert.DoesNotContain(":\\", result.StoragePath);
         Assert.Equal("application/pdf", result.ContentType);
     }
+
+    [Fact]
+    public async Task LocalFileStorageService_Should_Reject_Sibling_Path_Traversal()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "startupconnect-storage-root");
+        var service = new LocalFileStorageService(Options.Create(new FileStorageOptions
+        {
+            LocalRootPath = root,
+            SigningKey = "test-signing-key"
+        }));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.OpenReadAsync("../startupconnect-storage-root-evil/file.pdf", CancellationToken.None));
+    }
+
+    [Fact]
+    public void LocalFileStorageService_Should_Reject_Invalid_Expiry()
+    {
+        var service = new LocalFileStorageService(Options.Create(new FileStorageOptions
+        {
+            SigningKey = "test-signing-key"
+        }));
+
+        Assert.False(service.ValidateDownloadUrl("file.pdf", long.MaxValue, "invalid"));
+    }
 }

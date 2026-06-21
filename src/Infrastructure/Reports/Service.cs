@@ -227,7 +227,7 @@ public sealed class ReportService(
         var total = await reports.CountAsync(cancellationToken);
         var items = await reports
             .OrderByDescending(report => report.CreatedAt)
-            .Skip((page - 1) * pageSize)
+            .Skip(Pagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .ToArrayAsync(cancellationToken);
 
@@ -418,7 +418,7 @@ public sealed class ReportService(
 
     private async Task EnsureRateLimitAsync(Guid reporterUserId, CancellationToken cancellationToken)
     {
-        var today = DateTimeOffset.UtcNow.Date;
+        var today = new DateTimeOffset(DateTime.UtcNow.Date, TimeSpan.Zero);
         var tomorrow = today.AddDays(1);
         var count = await dbContext.Reports.CountAsync(report =>
             report.ReporterUserId == reporterUserId &&
@@ -501,6 +501,21 @@ public sealed class ReportService(
             throw new ValidationException([new ErrorDetail("Required", "Description is required", "description")]);
         }
 
+        if (request.TargetType.Trim().Length > 80)
+        {
+            throw new ValidationException([new ErrorDetail("TooLong", "Target type must be at most 80 characters", "targetType")]);
+        }
+
+        if (request.Description.Trim().Length > 2000)
+        {
+            throw new ValidationException([new ErrorDetail("TooLong", "Description must be at most 2000 characters", "description")]);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Evidence) && request.Evidence.Trim().Length > 2000)
+        {
+            throw new ValidationException([new ErrorDetail("TooLong", "Evidence must be at most 2000 characters", "evidence")]);
+        }
+
         if (NormalizeTargetType(request.TargetType) == "User" && request.TargetId == reporterUserId)
         {
             throw new ApiException("You cannot report yourself", HttpStatusCode.BadRequest);
@@ -517,6 +532,11 @@ public sealed class ReportService(
         if (string.IsNullOrWhiteSpace(reason))
         {
             throw new ValidationException([new ErrorDetail("Required", "Reason is required", "reason")]);
+        }
+
+        if (reason.Trim().Length > 1000)
+        {
+            throw new ValidationException([new ErrorDetail("TooLong", "Reason must be at most 1000 characters", "reason")]);
         }
     }
 

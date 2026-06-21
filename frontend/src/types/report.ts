@@ -27,6 +27,16 @@ export interface CreateReportRequest {
   evidence?: string;
 }
 
+export interface ReportTargetContextDto {
+  targetType: string;
+  targetId: string;
+  exists: boolean;
+  canReport: boolean;
+  displayName?: string | null;
+  ownerEmail?: string | null;
+  reason?: string | null;
+}
+
 export interface ReportActionDto {
   id: string;
   reportId: string;

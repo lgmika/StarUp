@@ -70,7 +70,17 @@ public sealed class LocalFileStorageService(IOptions<FileStorageOptions> options
 
     public bool ValidateDownloadUrl(string storagePath, long expiresUnixSeconds, string signature)
     {
-        if (DateTimeOffset.FromUnixTimeSeconds(expiresUnixSeconds) < DateTimeOffset.UtcNow)
+        DateTimeOffset expiresAt;
+        try
+        {
+            expiresAt = DateTimeOffset.FromUnixTimeSeconds(expiresUnixSeconds);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return false;
+        }
+
+        if (expiresAt < DateTimeOffset.UtcNow)
         {
             return false;
         }
@@ -83,9 +93,12 @@ public sealed class LocalFileStorageService(IOptions<FileStorageOptions> options
 
     private string ResolvePath(string storagePath)
     {
-        var root = Path.GetFullPath(options.LocalRootPath);
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(options.LocalRootPath));
         var combined = Path.GetFullPath(Path.Combine(root, storagePath.Replace('/', Path.DirectorySeparatorChar)));
-        if (!combined.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        var relative = Path.GetRelativePath(root, combined);
+        if (Path.IsPathRooted(relative) ||
+            relative.Equals("..", StringComparison.Ordinal) ||
+            relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
         {
             throw new InvalidOperationException("Storage path escapes the configured storage root.");
         }

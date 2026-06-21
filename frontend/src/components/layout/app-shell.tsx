@@ -2,13 +2,16 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { FormEvent, useEffect, useState, type ReactNode } from "react";
-import { Activity, Bell, ChevronDown, LogOut, Menu, Search, UserRound } from "lucide-react";
+import { FormEvent, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useTheme } from "next-themes";
+import { Activity, Bell, ChevronDown, ChevronRight, LogOut, Menu, Moon, Search, Sun, UserRound, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { getPrimaryRole } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { notificationService } from "@/services";
+import { queryKeys } from "@/lib/query-keys";
 import { useAuthStore } from "@/stores/auth-store";
 import type { NotificationDto } from "@/types/notification";
 import { getVisibleNavSections } from "./navigation";
@@ -21,18 +24,17 @@ export function AppShell({ children }: { children: ReactNode }) {
   const sections = getVisibleNavSections(user?.roles ?? []);
   const primaryRole = getPrimaryRole(user?.roles ?? []);
   const [query, setQuery] = useState("");
-  const [notifications, setNotifications] = useState<NotificationDto[]>([]);
+  const { resolvedTheme, setTheme } = useTheme();
+  const [mobileOpen, setMobileOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const { data: notifications = [] } = useQuery<NotificationDto[]>({
+    queryKey: queryKeys.notifications,
+    queryFn: () => notificationService.listNotifications(),
+    enabled: Boolean(user),
+  });
   const unreadCount = notifications.filter((notification) => !notification.readAt).length;
-
-  useEffect(() => {
-    async function loadNotifications() {
-      setNotifications(await notificationService.listNotifications());
-    }
-
-    void loadNotifications();
-  }, []);
+  const activeItem = sections.flatMap((section) => section.items).find((item) => pathname === item.href || pathname.startsWith(`${item.href}/`));
 
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -104,11 +106,48 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </aside>
 
+      {mobileOpen ? (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          <button className="absolute inset-0 bg-black/40" type="button" aria-label="Close navigation" onClick={() => setMobileOpen(false)} />
+          <aside className="relative flex h-full w-[min(88vw,320px)] flex-col border-r border-border bg-card shadow-xl">
+            <div className="flex h-16 items-center justify-between border-b border-border px-4">
+              <Link className="flex items-center gap-3" href="/dashboard" onClick={() => setMobileOpen(false)}>
+                <span className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground"><Activity className="h-5 w-5" /></span>
+                <span className="text-sm font-semibold">StartupConnect</span>
+              </Link>
+              <button className="flex h-10 w-10 items-center justify-center rounded-md hover:bg-accent" type="button" aria-label="Close navigation" onClick={() => setMobileOpen(false)}>
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <nav className="flex-1 overflow-y-auto px-3 py-4">
+              {sections.map((section) => (
+                <div key={section.title} className="mb-5">
+                  <p className="px-3 text-xs font-medium uppercase text-muted-foreground">{section.title}</p>
+                  <div className="mt-2 space-y-1">
+                    {section.items.map((item) => {
+                      const Icon = item.icon;
+                      const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+                      return (
+                        <Link key={item.href} href={item.href} onClick={() => setMobileOpen(false)} className={cn("flex h-10 items-center gap-3 rounded-md px-3 text-sm font-medium", active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground")}>
+                          <Icon className="h-4 w-4" />{item.title}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </nav>
+          </aside>
+        </div>
+      ) : null}
+
       <div className="lg:pl-72">
         <header className="sticky top-0 z-20 border-b border-border bg-card/95 backdrop-blur">
           <div className="flex min-h-16 items-center justify-between gap-3 px-4 py-3 sm:px-6 lg:px-8">
             <div className="flex min-w-0 items-center gap-3">
-              <Menu className="h-5 w-5 text-muted-foreground lg:hidden" />
+              <button className="flex h-10 w-10 items-center justify-center rounded-md border border-border lg:hidden" type="button" aria-label="Open navigation" onClick={() => setMobileOpen(true)}>
+                <Menu className="h-5 w-5" />
+              </button>
               <div className="min-w-0">
                 <p className="truncate text-sm font-semibold">StartupConnect Console</p>
                 <p className="truncate text-xs text-muted-foreground">{user?.email}</p>
@@ -130,6 +169,14 @@ export function AppShell({ children }: { children: ReactNode }) {
             </form>
 
             <div className="relative flex items-center gap-2">
+              <button
+                type="button"
+                aria-label={resolvedTheme === "dark" ? "Use light theme" : "Use dark theme"}
+                className="flex h-10 w-10 items-center justify-center rounded-md border border-border hover:bg-accent"
+                onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+              >
+                {resolvedTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
               <button
                 type="button"
                 aria-label="Open notifications"
@@ -199,25 +246,11 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
           </div>
 
-          <nav className="flex gap-2 overflow-x-auto border-t border-border px-4 py-2 lg:hidden">
-            {sections.flatMap((section) =>
-              section.items.map((item) => {
-                const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-                return (
-                  <Link
-                    key={item.href}
-                    className={cn(
-                      "whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium",
-                      active ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
-                    )}
-                    href={item.href}
-                  >
-                    {item.title}
-                  </Link>
-                );
-              })
-            )}
-          </nav>
+          <div className="flex min-h-10 items-center gap-1 border-t border-border px-4 text-xs text-muted-foreground sm:px-6 lg:px-8">
+            <Link href="/dashboard" className="hover:text-foreground">Workspace</Link>
+            <ChevronRight className="h-3.5 w-3.5" />
+            <span className="truncate font-medium text-foreground">{activeItem?.title ?? "Page"}</span>
+          </div>
         </header>
         <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</main>
       </div>

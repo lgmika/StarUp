@@ -66,12 +66,16 @@ export const profileService = {
     await api.delete<ApiResponse<null>>(`/cvs/${cvId}`);
   },
 
-  async uploadCv(file: File) {
+  async uploadCv(file: File, onProgress?: (percent: number) => void) {
     const formData = new FormData();
     formData.append("file", file);
 
     const { data } = await api.post<ApiResponse<CvDto>>("/cvs/upload", formData, {
       headers: { "Content-Type": "multipart/form-data" },
+      onUploadProgress: (event) => {
+        if (!event.total) return;
+        onProgress?.(Math.round((event.loaded / event.total) * 100));
+      },
     });
     return data.data;
   },
