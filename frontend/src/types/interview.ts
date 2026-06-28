@@ -38,6 +38,8 @@ export interface UpdateInterviewRequest {
   participantUserIds?: string[];
 }
 
+export type CreateInterviewRequest = UpdateInterviewRequest;
+
 export interface InterviewDecisionRequest {
   reason: string;
 }

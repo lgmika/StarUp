@@ -12,4 +12,5 @@ export const queryKeys = {
   billing: ["billing"] as const,
   files: ["files"] as const,
   admin: ["admin"] as const,
+  chat: ["chat"] as const,
 };

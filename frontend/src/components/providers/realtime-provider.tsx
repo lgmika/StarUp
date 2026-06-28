@@ -37,7 +37,7 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     const connection = new HubConnectionBuilder()
       .withUrl(REALTIME_HUB_URL, { accessTokenFactory: () => getAccessToken() ?? "" })
       .withAutomaticReconnect([0, 2_000, 5_000, 10_000, 30_000])
-      .configureLogging(LogLevel.Warning)
+      .configureLogging(LogLevel.None)
       .build();
 
     for (const [eventName, queryKey] of Object.entries(eventQueries)) {
@@ -46,9 +46,13 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
       });
     }
 
-    void connection.start().catch(() => undefined);
+    let isMounted = true;
+    void connection.start().catch((err) => {
+      if (isMounted) console.error("SignalR Connection Error:", err);
+    });
 
     return () => {
+      isMounted = false;
       if (connection.state !== HubConnectionState.Disconnected) {
         void connection.stop();
       }

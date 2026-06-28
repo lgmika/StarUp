@@ -55,6 +55,19 @@ export const investorService = {
     return data.data;
   },
 
+  async listProjectInterests(projectId: string) {
+    const { data } = await api.get<ApiResponse<InvestorInterestDto[]>>(`/projects/${projectId}/investor-interests`);
+    return data.data;
+  },
+
+  async decideInterest(projectId: string, interestId: string, action: "accept" | "reject" | "request-more-info", response?: string) {
+    const { data } = await api.post<ApiResponse<InvestorInterestDto>>(
+      `/projects/${projectId}/investor-interests/${interestId}/${action}`,
+      { response: response?.trim() || undefined }
+    );
+    return data.data;
+  },
+
   async withdrawInterest(projectId: string, interestId: string) {
     const { data } = await api.post<ApiResponse<InvestorInterestDto>>(`/projects/${projectId}/investor-interests/${interestId}/withdraw`);
     return data.data;

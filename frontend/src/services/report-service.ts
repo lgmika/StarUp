@@ -35,6 +35,11 @@ export const reportService = {
     return data.data;
   },
 
+  async getModeratorReport(reportId: string) {
+    const { data } = await api.get<ApiResponse<ReportDetailDto>>(`/moderator/reports/${reportId}`);
+    return data.data;
+  },
+
   async assign(reportId: string, reason: string) {
     const { data } = await api.post<ApiResponse<ReportDetailDto>>(`/moderator/reports/${reportId}/assign`, { reason });
     return data.data;

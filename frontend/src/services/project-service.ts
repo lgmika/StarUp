@@ -8,6 +8,10 @@ import type {
   UpdateProjectRequest,
 } from "@/types/project";
 import type { AIRecommendationDto, AIReviewDto, ApplyAIRecommendationResponse } from "@/types/ai";
+import type { ActivityListResponse } from "@/types/activity";
+import type { FounderProjectDashboardDto } from "@/types/dashboard";
+import type { MemberRecommendationDto, RecommendationListResponse } from "@/types/recommendation";
+import type { AITextResponse } from "@/types/ai";
 
 export const projectService = {
   async listProjects(search?: string) {
@@ -64,6 +68,36 @@ export const projectService = {
     const { data } = await api.get<ApiResponse<ProjectVersionDto[]>>(`/projects/${projectId}/versions`, {
       skipForbiddenRedirect: true,
     });
+    return data.data;
+  },
+
+  async getProjectActivities(projectId: string, page = 1, pageSize = 20) {
+    const { data } = await api.get<ApiResponse<ActivityListResponse>>(`/projects/${projectId}/activities`, {
+      params: { page, pageSize },
+      allowAnonymousFallback: true,
+    });
+    return data.data;
+  },
+
+  async getProjectDashboard(projectId: string) {
+    const { data } = await api.get<ApiResponse<FounderProjectDashboardDto>>(`/projects/${projectId}/dashboard`, {
+      params: { timezoneOffsetMinutes: new Date().getTimezoneOffset() },
+    });
+    return data.data;
+  },
+
+  async getRecommendedMembers(projectId: string, page = 1, pageSize = 20) {
+    const { data } = await api.get<ApiResponse<RecommendationListResponse<MemberRecommendationDto>>>(`/projects/${projectId}/recommended-members`, { params: { page, pageSize } });
+    return data.data;
+  },
+
+  async getAiReviews(projectId: string) {
+    const { data } = await api.get<ApiResponse<AIReviewDto[]>>(`/projects/${projectId}/ai/reviews`);
+    return data.data;
+  },
+
+  async getInvestorSummary(projectId: string) {
+    const { data } = await api.get<ApiResponse<AITextResponse>>(`/projects/${projectId}/investor-summary`);
     return data.data;
   },
 

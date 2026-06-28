@@ -1,8 +1,8 @@
 "use client";
 
-import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { FormEvent, useState, type ReactNode } from "react";
+import { useTranslations, useLocale } from "next-intl";
+import { useRouter, Link, usePathname } from "@/i18n/routing";
+import { FormEvent, useState, useEffect, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import { Activity, Bell, ChevronDown, ChevronRight, LogOut, Menu, Moon, Search, Sun, UserRound, X } from "lucide-react";
@@ -19,12 +19,41 @@ import { getVisibleNavSections } from "./navigation";
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const locale = useLocale();
+  const t = useTranslations("AppShell");
+  const tNav = useTranslations("Navigation");
+
+  const getNavKey = (title: string) => {
+    const map: Record<string, string> = {
+      "Discover projects": "discover",
+      "NDA agreements": "nda",
+      "My reports": "reports",
+      "Saved projects": "savedProjects",
+      "Create project": "createProject",
+      "Received applications": "receivedApplications",
+      "Files & CVs": "files",
+      "Discover investments": "discoverInvestments",
+      "My interests": "myInterests",
+      "Investor profile": "investorProfile",
+      "Pending projects": "pendingProjects",
+      "Audit logs": "auditLogs",
+      "Background jobs": "backgroundJobs",
+      "Email outbox": "emailOutbox",
+      "NDA templates": "ndaTemplates",
+      "Plans & quotas": "plans",
+      "My projects": "myProjects"
+    };
+    return map[title] || title.toLowerCase();
+  };
+
   const user = useAuthStore((state) => state.user);
   const logoutRemote = useAuthStore((state) => state.logoutRemote);
   const sections = getVisibleNavSections(user?.roles ?? []);
   const primaryRole = getPrimaryRole(user?.roles ?? []);
   const [query, setQuery] = useState("");
   const { resolvedTheme, setTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -58,14 +87,14 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold">StartupConnect</p>
-            <p className="truncate text-xs text-muted-foreground">App workspace</p>
+            <p className="truncate text-xs text-muted-foreground">{t('appWorkspace')}</p>
           </div>
         </div>
 
         <nav className="flex-1 overflow-y-auto px-3 py-4">
           {sections.map((section) => (
             <div key={section.title} className="mb-5">
-              <p className="px-3 text-xs font-medium uppercase tracking-normal text-muted-foreground">{section.title}</p>
+              <p className="px-3 text-xs font-medium uppercase tracking-normal text-muted-foreground">{tNav(getNavKey(section.title))}</p>
               <div className="mt-2 space-y-1">
                 {section.items.map((item) => {
                   const Icon = item.icon;
@@ -82,7 +111,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                       href={item.href}
                     >
                       <Icon className="h-4 w-4" />
-                      {item.title}
+                      {tNav(getNavKey(item.title))}
                     </Link>
                   );
                 })}
@@ -101,8 +130,28 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
           <Button className="mt-3 w-full" variant="outline" onClick={handleLogout}>
             <LogOut className="h-4 w-4" />
-            Logout
+            {t('logout')}
           </Button>
+          <div className="mt-4 space-y-4 border-t border-border pt-4">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground">{t('theme')}</span>
+              <button
+                type="button"
+                aria-label={mounted && resolvedTheme === "dark" ? "Use light theme" : "Use dark theme"}
+                className="flex h-8 w-8 items-center justify-center rounded-md bg-muted hover:bg-accent"
+                onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+              >
+                {mounted && resolvedTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground">{t('language')}</span>
+              <div className="flex bg-muted rounded-md p-1">
+                 <Link href={pathname || "/"} locale="en" className={cn("px-2 py-1 text-xs rounded-sm", locale === 'en' && "bg-background shadow-sm")}>EN</Link>
+                 <Link href={pathname || "/"} locale="vi" className={cn("px-2 py-1 text-xs rounded-sm", locale === 'vi' && "bg-background shadow-sm")}>VI</Link>
+              </div>
+            </div>
+          </div>
         </div>
       </aside>
 
@@ -122,14 +171,14 @@ export function AppShell({ children }: { children: ReactNode }) {
             <nav className="flex-1 overflow-y-auto px-3 py-4">
               {sections.map((section) => (
                 <div key={section.title} className="mb-5">
-                  <p className="px-3 text-xs font-medium uppercase text-muted-foreground">{section.title}</p>
+                  <p className="px-3 text-xs font-medium uppercase text-muted-foreground">{tNav(getNavKey(section.title))}</p>
                   <div className="mt-2 space-y-1">
                     {section.items.map((item) => {
                       const Icon = item.icon;
                       const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
                       return (
                         <Link key={item.href} href={item.href} onClick={() => setMobileOpen(false)} className={cn("flex h-10 items-center gap-3 rounded-md px-3 text-sm font-medium", active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground")}>
-                          <Icon className="h-4 w-4" />{item.title}
+                          <Icon className="h-4 w-4" />{tNav(getNavKey(item.title))}
                         </Link>
                       );
                     })}
@@ -162,21 +211,13 @@ export function AppShell({ children }: { children: ReactNode }) {
                   id="global-search"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Search projects, members, investors..."
+                  placeholder={t('globalSearch')}
                   className="h-10 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 />
               </div>
             </form>
 
             <div className="relative flex items-center gap-2">
-              <button
-                type="button"
-                aria-label={resolvedTheme === "dark" ? "Use light theme" : "Use dark theme"}
-                className="flex h-10 w-10 items-center justify-center rounded-md border border-border hover:bg-accent"
-                onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-              >
-                {resolvedTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-              </button>
               <button
                 type="button"
                 aria-label="Open notifications"
@@ -247,9 +288,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
 
           <div className="flex min-h-10 items-center gap-1 border-t border-border px-4 text-xs text-muted-foreground sm:px-6 lg:px-8">
-            <Link href="/dashboard" className="hover:text-foreground">Workspace</Link>
+            <Link href="/dashboard" className="hover:text-foreground">{tNav('workspace')}</Link>
             <ChevronRight className="h-3.5 w-3.5" />
-            <span className="truncate font-medium text-foreground">{activeItem?.title ?? "Page"}</span>
+            <span className="truncate font-medium text-foreground">{activeItem ? tNav(getNavKey(activeItem.title)) : "Page"}</span>
           </div>
         </header>
         <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</main>

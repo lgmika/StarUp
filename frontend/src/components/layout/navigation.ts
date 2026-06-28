@@ -2,7 +2,7 @@ import {
   BarChart3, Bell, Bookmark, BriefcaseBusiness, CreditCard, ClipboardList,
   FileCheck2, FileText, Files, Folders, Handshake, LayoutDashboard, ListChecks,
   Mail, MessageSquareText, ScrollText, Search, Settings, ShieldCheck, Sparkles,
-  SquarePen, UserRound, UsersRound, type LucideIcon,
+  SquarePen, UserRound, UsersRound, Home, type LucideIcon,
 } from "lucide-react";
 import { SystemRoles, type SystemRole } from "@/lib/constants";
 import { getPrimaryRole, getRoleHome } from "@/lib/permissions";
@@ -53,5 +53,20 @@ export function getVisibleNavSections(roles: string[]) {
   const primaryRole = getPrimaryRole(roles) as SystemRole;
   const sections = roleSections[primaryRole] ?? roleSections[SystemRoles.User];
   const home = getRoleHome(roles);
-  return sections.map((section, index) => index === 0 ? { ...section, items: section.items.map((item, itemIndex) => itemIndex === 0 && item.title === "Dashboard" ? { ...item, href: home } : item) } : section);
+  
+  const platformSection: NavSection = {
+    title: "Platform",
+    items: [
+      { title: "Home", href: "/", icon: Home },
+      { title: "Discover projects", href: "/projects", icon: Search },
+    ],
+  };
+
+  const processedSections = sections.map((section, index) => 
+    index === 0 
+      ? { ...section, items: section.items.map((item, itemIndex) => itemIndex === 0 && item.title === "Dashboard" ? { ...item, href: home } : item) } 
+      : section
+  );
+
+  return [platformSection, ...processedSections];
 }
